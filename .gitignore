@@ -1,0 +1,43 @@
+# 依赖
+node_modules/
+package-lock.json.bak
+
+# 构建产物
+dist/
+build/
+out/
+*.apk
+*.aab
+*.ap_
+*.dex
+
+# Capacitor 生成物（由 npx cap copy 重新生成，不入库）
+android/app/src/main/assets/public/
+android/app/src/main/assets/capacitor.config.json
+
+# Android 构建与本地配置
+android/.gradle/
+android/build/
+android/app/build/
+android/app/release/
+android/local.properties
+android/.idea/
+android/.kotlin/
+android/capacitor-cordova-android-plugins/build/
+*.iml
+*.hprof
+
+# 签名文件（严禁入库）
+*.keystore
+*.jks
+key.properties
+google-services.json
+
+# 系统 / 编辑器
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.log
+npm-debug.log*
+yarn-error.log*

@@ -1,0 +1,11 @@
+// 指向 android/ 下的本地库副本（node_modules 里的串口插件被升到了 1.0.7，
+// 与 Capacitor 7 不兼容会导致启动白屏 ERR_CONNECTION_REFUSED，因此不要运行 cap update/sync 覆盖本文件；
+// 更新网页资源只运行: npx cap copy android）
+include ':capacitor-android'
+project(':capacitor-android').projectDir = new File('capacitor-android')
+
+include ':adeunis-capacitor-serial'
+project(':adeunis-capacitor-serial').projectDir = new File('adeunis-capacitor-serial')
+
+include ':capacitor-community-bluetooth-le'
+project(':capacitor-community-bluetooth-le').projectDir = new File('capacitor-community-bluetooth-le')

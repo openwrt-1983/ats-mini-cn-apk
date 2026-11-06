@@ -17,7 +17,9 @@
 
 // Menu.cpp menu[] / settings[] 项数
 export const MENU_COUNT = 14;
-export const SETTINGS_COUNT = 22;
+// settings[] 实际有 24 项：亮度…关于。旧版本的 22 项漏了「定时待机」和
+// 「编码器」，导致从第 5 项起 App 与真机整体错位一格，越往后差得越多。
+export const SETTINGS_COUNT = 24;
 
 // 固件 int8_t menuIdx = MENU_VOLUME; settingsIdx = MENU_BRIGHTNESS;
 export const MENU_DEFAULT_IDX = 2;
@@ -35,11 +37,17 @@ export const MENU_TO_CMD = [
   'memory', 'squelch', 'bw', 'agc', 'avc', 'softmute', 'settings',
 ];
 
-// 设置菜单 → 子面板（顺序 = Menu.cpp #define MENU_xxx）
+// 设置菜单 → 子面板（顺序 = Menu.cpp settings[]，共 24 项）
+//   0 亮度 / 1 日期时间 / 2 UTC 时区 / 3 休眠定时 / 4 休眠方式 /
+//   5 定时待机 / 6 关机定时 / 7 主题 / 8 界面布局 / 9 放大菜单 /
+//  10 编码器 / 11 滚动方向 / 12 RDS / 13 FM 立体声 / 14 FM 地区 /
+//  15 校准 / 16 DSP 补丁 / 17 载入 EiBi / 18 固件升级 / 19 USB 串口 /
+//  20 TCP 端口 / 21 蓝牙 / 22 Wi-Fi / 23 关于
 export const SETTINGS_TO_CMD = [
-  'brt', 'datetime', 'utcoffset', 'sleep', 'sleepmode', 'offtimer', 'theme', 'ui',
-  'zoom', 'scroll', 'rds', 'fm_stereo', 'fm_region', 'cal', 'dsp', 'eibi',
-  'updatefw', 'usbmode', 'tcpmode', 'blemode', 'wifimode', 'about',
+  'brt', 'datetime', 'utcoffset', 'sleep', 'sleepmode', 'stbytimer', 'offtimer',
+  'theme', 'ui', 'zoom', 'encoder', 'scroll', 'rds', 'fm_stereo', 'fm_region',
+  'cal', 'dsp', 'eibi', 'updatefw', 'usbmode', 'tcpmode', 'blemode', 'wifimode',
+  'about',
 ];
 
 // 各模式独立的步进档位（Menu.cpp steps[4]）

@@ -63,7 +63,7 @@ const MON_FIELD = {
 };
 
 export default function RemoteScreen({
-  serial, connected, monitor,
+  serial, connected, monitor, firmwareUi,
   stations = [], onReadStations, onSaveStation, onDeleteStation,
 }) {
   const canvasRef = useRef(null);
@@ -71,6 +71,8 @@ export default function RemoteScreen({
 
   // 固件 currentCmd 的状态机（唯一的面板依据，不再靠猜）
   const modelRef = useRef(createModel());
+  // 固件回报的界面状态。有它就以它为准；旧固件不推，才退回本地推断。
+  const firmwareUiRef = useRef(null);
   // 乐观预测层：field -> { v, base, t }
   const optimRef = useRef({});
   const monRef = useRef({});
@@ -103,6 +105,10 @@ export default function RemoteScreen({
   const asleepRef = useRef(false);
   const [asleep, setAsleep] = useState(false);
   const setSleep = (v) => { asleepRef.current = v; setAsleep(v); };
+  // 旧固件不认识 'Z' 时，用它把请求退回 'O'
+  const standbyFallbackRef = useRef(null);
+  // 旧固件不认识 'y' 时，用它把唤醒退回 'o'
+  const wakeFallbackRef = useRef(null);
 
   const [lastRx, setLastRx] = useState(0);
   useEffect(() => { if (monitor) setLastRx(Date.now()); }, [monitor]);
@@ -163,7 +169,8 @@ export default function RemoteScreen({
     const modeName = fresh('mode') ?? m.mode ?? 'AM';
     const modeIdx = MODE_NAMES.indexOf(modeName) >= 0 ? MODE_NAMES.indexOf(modeName) : 3;
     const modeKey = MODE_NAMES[modeIdx];
-    const nowD = new Date();
+    // 固件回报的界面状态（新固件才有）。有它就不必再靠「哪个数值在变」反推面板。
+    const fu = firmwareUiRef.current;
 
     return {
       ...DEFAULT_STATE,
@@ -173,7 +180,7 @@ export default function RemoteScreen({
       rssi: m.rssi || 0,
       snr: m.snr || 0,
       volume: fresh('volume') ?? m.volume ?? 0,
-      muted: muteRef.current,
+      muted: fu ? fu.muted : muteRef.current,
       agcNdx: parseInt(m.agc, 10) || 0,
       agcOn: fresh('agcOn') ?? parseInt(m.agc, 10) === 0,
       stepDesc: fresh('step') ?? m.step ?? '5k',
@@ -184,13 +191,26 @@ export default function RemoteScreen({
       calibration: m.calibration ?? 0,
       ble: true,
       bleConnected: !!connected,
-      sleep: asleepRef.current,
-      ui: uiKey(model),
-      menuIdx: model.menuIdx,
-      settingsIdx: model.settingsIdx,
+      sleep: fu ? fu.sleep : asleepRef.current,
+      // 以下六项只有固件回报时才存在，面板照实显示真机的数值
+      backlight: fu ? fu.backlight : undefined,
+      sleepTimer: fu ? fu.sleepTimer : undefined,
+      standbyTimer: fu ? fu.standbyTimer : undefined,
+      offTimer: fu ? fu.offTimer : undefined,
+      encoderHalfStep: fu ? fu.encoderHalfStep : undefined,
+      ui: fu ? fu.ui : uiKey(model),
+      // 界面布局：0 默认 / 1 S-Meter（固件 uiLayoutIdx）
+      uiLayout: fu ? (fu.layout || 0) : 0,
+      option: fu ? (fu.option || 0) : 0,
+      vfoIdx: fu ? (fu.vfo || 0) : 0,
+      stereo: fu ? !!fu.stereo : false,
+      menuIdx: fu ? fu.menuIdx : model.menuIdx,
+      settingsIdx: fu ? fu.settingsIdx : model.settingsIdx,
       stationName: '',
-      timeLabel: '时间',
-      timeText: pad2(nowD.getHours()) + ':' + pad2(nowD.getMinutes()),
+      // 第 6 行是固件的轮播位：没有定时器、没有对时就不显示。
+      // 不能拿手机时间顶上，否则真机空着 App 却多一行。
+      timeLabel: '时间:',
+      timeText: fu ? fu.clockText : undefined,
     };
   }, [connected]);
 
@@ -208,6 +228,28 @@ export default function RemoteScreen({
     renderScreen(ctx, buildState());
   }, [buildState]);
   drawRef.current = draw;
+
+  // 固件回报的界面状态：屏幕照它渲染，本地状态机跟着它走。
+  // 这是「和真机屏幕一模一样」的唯一依据 —— 不再靠「哪个数值在变」去猜面板。
+  // 旧固件不推这些字段，firmwareUi 恒为 null，下面整段跳过。
+  useEffect(() => {
+    firmwareUiRef.current = firmwareUi || null;
+    if (!firmwareUi) return;
+
+    const model = modelRef.current;
+    // 固件用 CMD_NONE 表示信息框，本地状态机用 'none'，这里做个翻译
+    model.cmd = firmwareUi.ui === 'info' ? 'none' : firmwareUi.ui;
+    model.menuIdx = firmwareUi.menuIdx;
+    model.settingsIdx = firmwareUi.settingsIdx;
+    model.lastAct = Date.now();
+
+    // 有固件实测状态就不需要探针了
+    probeRef.current = null;
+    setProbing(false);
+    setSleep(!!firmwareUi.sleep);
+    muteRef.current = !!firmwareUi.muted;
+    draw();
+  }, [firmwareUi, draw]);
 
   // 乐观预测：先改屏，等固件回传后自动让位
   const mark = (field, value) => {
@@ -231,6 +273,10 @@ export default function RemoteScreen({
 
     const model = modelRef.current;
     const now = Date.now();
+
+    // 固件已经回报界面状态，面板归属不必（也不该）再由「哪个字段在变」反推，
+    // 否则会和固件给的 currentCmd 互相打架。直接重画即可。
+    if (firmwareUiRef.current) { draw(); return; }
 
     // ---- 探针观察期：只判断真机在哪个面板，不做别的 ----
     if (probeRef.current) {
@@ -387,40 +433,105 @@ export default function RemoteScreen({
   // 固件 ParserAdhoc.cpp：'e' = handleClick(false) 点击、'E' = handleClick(true) 短按，
   // 长按 (>LONG_PRESS_INTERVAL 2s) 在 ats-mini.ino 里是独立的开关屏幕分支。
   // 以前靠「按住多久」推断，手指一滑就会多判一次，导致点一下变两下、面板跳级。
+  // 唤醒：屏幕亮起来 + 把『休眠方式』切回 CPU 睡眠（SLEEP_LIGHT）。
+  //
+  // 为什么唤醒也要动休眠方式：'Z' 会把休眠方式持久化成「BLE 待机」。如果醒来后
+  // 不改回去，收音机就一直停在 BLE 待机档 —— 之后真机长按编码器会再断电静音，
+  // 用户在收音机上长按一下以为只是熄屏，结果收音机哑了。所以每次醒来都发 'y'：
+  // 固件先 sleepOn(false) 正确唤醒（按当前档恢复功放/收音/SI4732），再把休眠
+  // 方式存成 CPU 睡眠。CPU 睡眠 = 只熄屏，收音机继续放，这正是真机长按的常规行为。
   const wakeUp = () => {
+    clearTimeout(standbyFallbackRef.current);
+    standbyFallbackRef.current = null;
+    clearTimeout(wakeFallbackRef.current);
+    wakeFallbackRef.current = null;
     setSleep(false);
-    serial?.sleepOff?.();
+    setStatus('');
+    if (serial?.wakeLight) {
+      serial.wakeLight();
+      // 旧固件不认 'y'，屏不会亮。800ms 没等到 sleep=0 就补发 'o' 兜底。
+      wakeFallbackRef.current = setTimeout(() => {
+        wakeFallbackRef.current = null;
+        const fu = firmwareUiRef.current;
+        if (fu && !fu.sleep) return; // 已确认醒来
+        serial?.sleepOff?.();
+      }, 800);
+    } else {
+      serial?.sleepOff?.();
+    }
     modelRef.current.cmd = 'none';
     draw();
   };
 
+  // 单击 / 「BLE 待机」按钮 = 进 / 出蓝牙待机。
+  //
+  // 固件里「蓝牙待机」到底是什么（见 Utils.cpp 的 bleStandbyEnter + sleepOn）：
+  //   sleepModeIdx == SLEEP_BLE_KEEPALIVE 时熄屏，然后
+  //     用户静音（若原本没静音）→ 功放 EN 拉低 → 停 Wi-Fi → SI4732 powerDown()
+  //     → CPU 降到 80MHz → 广播间隔放慢到 500ms
+  //   也就是：屏幕黑、喇叭不响、收音机芯片断电、只剩 BLE 在跑，'o' 才能叫醒。
+  // 这一档平时要靠「设置 → 休眠方式 → BLE 待机」再熄屏才能进；出厂默认是
+  // SLEEP_LOCKED，直接发 'O' 只会黑屏、收音机照响 —— 这正是之前点待机「不对」的原因。
+  //
+  // 所以进待机发 'Z'：固件收到后先把休眠方式存成 BLE 待机，再走 standbyEnter()，
+  // 一步到位且以后真机长按也是这个效果。唤醒发 'o'（SleepOff）。
   const toggleSleep = () => {
     if (!connected) return;
     const model = modelRef.current;
     if (asleepRef.current) {
       wakeUp();
-    } else {
-      setSleep(true);
-      serial?.sleepOn?.();
-      model.cmd = 'none';
+      return;
     }
+    setSleep(true);
+    setStatus('');
+    if (serial?.bleStandby) serial.bleStandby();
+    else serial?.sleepOn?.();
+    model.cmd = 'none';
     draw();
+    // 固件每 500ms 推一次状态，正常 0.6 秒内就能看到 sleep=1。
+    // 1.4 秒还没确认说明收音机跑的不是配套固件（旧固件不认 'Z'）：
+    //   · 完全不回报界面 → 退回 'O'，按固件里的『休眠方式』走，至少行为与真机一致
+    //   · 会回报界面但没进待机 → 不接受假状态，退回未休眠并说明原因
+    clearTimeout(standbyFallbackRef.current);
+    standbyFallbackRef.current = setTimeout(() => {
+      standbyFallbackRef.current = null;
+      const fu = firmwareUiRef.current;
+      if (fu && fu.sleep) return;
+      if (fu) {
+        setSleep(false);
+        setStatus('固件没确认待机（睡眠方式可能被锁定），请再点一次或长按熄屏');
+        draw();
+        return;
+      }
+      // 旧固件：'Z' 不认识，只能退回 'O'（按固件里的休眠方式熄屏）。
+      // 出厂默认 SLEEP_LOCKED 下这一步只黑屏，收音机照响 —— 如实说明，不要假装成功。
+      serial?.sleepOn?.();
+      setStatus('固件未配套：只熄了屏，收音机还在响。刷 ats-mini.ino.merged.bin 后才能真正待机');
+    }, 900);
   };
 
-  // 长按 = 固件 ats-mini.ino 的 button.isLongPressed 分支：开关屏幕，不改 currentCmd
+  // 长按 = 真机长按编码器：按『休眠方式』设置熄屏/亮屏，不做强制待机
   const doLongPress = () => {
     if (!connected) return;
-    toggleSleep();
+    if (asleepRef.current) { wakeUp(); return; }
+    setSleep(true);
+    serial?.sleepOn?.();
+    modelRef.current.cmd = 'none';
+    draw();
   };
 
   const doClick = (shortPress) => {
     if (!connected) return;
     if (asleepRef.current) { wakeUp(); return; }
-    const before = modelRef.current.cmd;
     shortPress ? serial?.encoderShortPress?.() : serial?.encoderPress?.();
-    onPress(modelRef.current, shortPress, monRef.current);
-    // 固件 clickVolume(shortPress=true) 翻转静音；其它面板短按不会动静音
-    if (shortPress && before === 'volume') muteRef.current = !muteRef.current;
+    if (!firmwareUiRef.current) {
+      // 旧固件不回报界面，只能本地预测；等状态流回来再纠正
+      const before = modelRef.current.cmd;
+      onPress(modelRef.current, shortPress, monRef.current);
+      // 固件 clickVolume(shortPress=true) 翻转静音；其它面板短按不会动静音
+      if (shortPress && before === 'volume') muteRef.current = !muteRef.current;
+    }
+    // 新固件会在下一条状态流里带回真实 currentCmd，本地不做猜测，避免跳级
     draw();
   };
 
@@ -428,6 +539,8 @@ export default function RemoteScreen({
   const syncClick = () => {
     if (!connected) return;
     if (asleepRef.current) { wakeUp(); return; }
+    // 固件已经回报真实界面，点在哪个面板就是哪个面板，探针完全不需要
+    if (firmwareUiRef.current) { doClick(false); return; }
     const model = modelRef.current;
     const now = Date.now();
     const recent = now - connectAtRef.current > 3000
@@ -526,6 +639,12 @@ export default function RemoteScreen({
 
   const dataFresh = connected && Date.now() - lastRx < 1200;
 
+  // 收音机跑的固件是否配套（会回报 15 项之后那批界面字段）。
+  // 不配套时：面板内容、光标位置、休眠状态全都只能由 App 猜，屏幕必然和真机不同步。
+  // 与其让用户以为是 App 的 bug，不如直接在界面上说清楚。
+  const paired = !!firmwareUi;
+  const fieldCount = monitor?.fields || 0;
+
   return (
     <div className="h-full flex flex-col landscape:flex-row gap-2 overflow-hidden">
 
@@ -551,17 +670,33 @@ export default function RemoteScreen({
             }`}
             title="点一下把面板复位到信息框"
           >
-            {dataFresh ? '● 实时' : connected ? '○ 无数据' : '未连接'}
+            {dataFresh ? (paired ? '● 同步' : '● 实时') : connected ? '○ 无数据' : '未连接'}
           </button>
           {asleep && (
             <button
               onClick={toggleSleep}
-              className="absolute inset-0 w-full h-full text-[11px] text-white/50"
+              className="absolute inset-0 w-full h-full flex flex-col items-center justify-center gap-1 text-[11px] text-white/50"
             >
-              已休眠 · 点一下唤醒
+              <span>{paired ? '已休眠 · 点一下唤醒' : '屏已熄 · 点一下唤醒'}</span>
+              {!paired && (
+                <span className="text-[9px] text-icom-amber px-4 leading-snug">
+                  固件未配套：只是黑了屏，收音机还在响
+                </span>
+              )}
             </button>
           )}
         </div>
+
+        {/* ===== 固件配套检查：不配套就把话说明白，别让用户以为屏幕不同步是 App 的问题 ===== */}
+        {connected && !paired && (
+          <div className="rounded border border-red-500/40 bg-red-500/10 px-2 py-1.5 text-[10px] leading-relaxed text-red-300">
+            收音机固件未配套（收到 {fieldCount}/29 项状态）。面板文字和光标只能由 App 推算，
+            所以菜单、设置、模式这些一定会和真机对不上；「BLE 待机」也只是熄屏，不会静音断电。
+            <div className="mt-0.5 text-red-200/80">
+              把 <span className="font-digital">ats-mini.ino.merged.bin</span> 刷到 0x0 地址，重连后这里会自动消失。
+            </div>
+          </div>
+        )}
 
         {/* ===== 编码器：旋转左右两个 + 中间「点击」；下方「短按 / 长按」 ===== */}
         <div className="flex flex-col gap-2">
@@ -626,7 +761,7 @@ export default function RemoteScreen({
                 active:translate-y-0.5 transition disabled:opacity-30"
             >
               <span>{asleep ? '长按唤醒' : '长按熄屏'}</span>
-              <span className="text-[8px] text-icom-text-dim">O / o · 长按编码器</span>
+              <span className="text-[8px] text-icom-text-dim">O 熄屏 / y 唤醒·切CPU睡眠</span>
             </button>
           </div>
         </div>
@@ -654,7 +789,7 @@ export default function RemoteScreen({
           <B label="背光 ◄" cmd="l" onClick={() => serial?.backlightDown?.()} />
           <B label="背光 ►" cmd="L" onClick={() => serial?.backlightUp?.()} />
           <B label="校准 +" cmd="I" tone="acc" onClick={() => serial?.calibrationUp?.()} />
-          <B label={asleep ? '唤醒' : '休眠'} cmd={asleep ? 'o' : 'O'} tone="warn" onClick={toggleSleep} />
+          <B label={asleep ? '唤醒' : 'BLE 待机'} cmd={asleep ? 'y' : 'Z'} tone="warn" onClick={toggleSleep} />
         </div>
 
         {/* 存储电台：上一个 / 下一个 / 保存 / 删除 */}

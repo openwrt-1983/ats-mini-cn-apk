@@ -1,0 +1,957 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<title>ATS Mini 屏幕镜像预览</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#f4f5f7;color:#1f2328;font-family:-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;padding:28px}
+header{max-width:1180px;margin:0 auto 22px}
+h1{font-size:20px;font-weight:650;letter-spacing:.2px}
+.sub{color:#57606a;font-size:13px;margin-top:6px;line-height:1.6}
+#grid{max-width:1180px;margin:0 auto;display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:16px}
+.card{background:#fff;border:1px solid #e3e5e8;border-radius:10px;padding:12px 12px 10px;box-shadow:0 1px 2px rgba(0,0,0,.04)}
+.card h2{font-size:13px;font-weight:600;margin-bottom:9px;color:#24292f}
+.screen{width:100%;height:auto;display:block;border-radius:5px;border:1px solid #2a2f36;background:#0b0e12;image-rendering:pixelated}
+.card p{font-size:11.5px;color:#6a737d;margin-top:8px;line-height:1.5}
+</style></head>
+<body>
+<header>
+  <h1>ATS Mini 屏幕镜像 · 渲染预览</h1>
+  <div class="sub">320×170，与固件 drawLayoutDefault / drawLayoutSmeter / drawSideBar 同一套几何。以下每一格都是 renderScreen() 的真实输出（2× 缩放）。<br>
+  <b>第 1 格</b>按你的真机照片复原（VHF 97.00 FM / RSSI 39 / SNR 18），<b>第 2 格</b>是同一状态下默认布局的样子，两格都能在 App 里实时切换。</div>
+</header>
+<div id="grid"></div>
+<script>(() => {
+  // src/lib/screenRenderer.js
+  var SW = 320;
+  var SH = 170;
+  var LAYOUT = {
+    MENU_X: 0,
+    MENU_Y: 18,
+    MENU_DX: 10,
+    METER_X: 0,
+    METER_Y: 0,
+    SAVE_X: 90,
+    SAVE_Y: 0,
+    FREQ_X: 250,
+    FREQ_Y: 62,
+    FUNIT_X: 255,
+    FUNIT_Y: 62 - 23,
+    BAND_X: 150,
+    BAND_Y: 9,
+    RDS_X: 165,
+    RDS_Y: 94,
+    STATUS_X: 160,
+    STATUS_Y: 135,
+    BATT_X: 288,
+    BATT_Y: 0,
+    WIFI_X: 237,
+    WIFI_Y: 0,
+    BLE_X: 104,
+    BLE_Y: 0,
+    // Draw.h：S-Meter 布局（UI_SMETER）专用偏移
+    ALT_MENU_X: 0,
+    ALT_MENU_Y: 0,
+    ALT_METER_X: 75,
+    ALT_METER_Y: 136,
+    ALT_STEREO_X: 251,
+    ALT_STEREO_Y: 24
+  };
+  var SB_X = LAYOUT.MENU_X;
+  var SB_Y = LAYOUT.MENU_Y;
+  var THEME_DEFAULT = {
+    bg: "#000000",
+    text: "#ffffff",
+    smeter_icon: "#d0d0d0",
+    smeter_bar: "#00fc00",
+    smeter_bar_plus: "#ff0000",
+    smeter_bar_empty: "#303030",
+    save_icon: "#ff0000",
+    rf_icon: "#ff0000",
+    rf_icon_conn: "#00fc00",
+    batt_voltage: "#ffffff",
+    batt_border: "#ffffff",
+    batt_full: "#00fc00",
+    batt_low: "#ff0000",
+    batt_charge: "#000000",
+    batt_icon: "#ffff00",
+    band_text: "#d0d0d0",
+    mode_text: "#d0d0d0",
+    mode_border: "#d0d0d0",
+    box_bg: "#000000",
+    box_border: "#d0d0d0",
+    box_text: "#d0d0d0",
+    box_off_bg: "#ff0000",
+    box_off_text: "#b8d8f8",
+    menu_bg: "#000000",
+    menu_border: "#ff0000",
+    menu_hdr: "#ffffff",
+    menu_item: "#bddaFF",
+    menu_hl_bg: "#1004de",
+    menu_hl_text: "#bddaFF",
+    menu_param: "#bddaFF",
+    freq_text: "#ffffff",
+    funit_text: "#d0d0d0",
+    freq_hl: "#ff0000",
+    freq_hl_sel: "#ffff00",
+    rds_text: "#d0d0d0",
+    scale_text: "#ffffff",
+    scale_pointer: "#ff0000",
+    scale_line: "#c0c4c0"
+  };
+  var MODE_DESC = ["FM", "LSB", "USB", "AM"];
+  var MENU_ITEMS = [
+    "\u6A21\u5F0F",
+    "\u6CE2\u6BB5",
+    "\u97F3\u91CF",
+    "VFO A/B",
+    "\u6B65\u8FDB",
+    "\u641C\u53F0",
+    "\u626B\u9891",
+    "\u8BB0\u5FC6",
+    "\u9759\u566A",
+    "\u5E26\u5BBD",
+    "AGC/ATTN",
+    "AVC",
+    "\u8F6F\u9759\u97F3",
+    "\u8BBE\u7F6E"
+  ];
+  var SETTINGS_ITEMS = [
+    "\u4EAE\u5EA6",
+    "\u65E5\u671F\u65F6\u95F4",
+    "UTC \u65F6\u533A",
+    "\u4F11\u7720\u5B9A\u65F6",
+    "\u4F11\u7720\u65B9\u5F0F",
+    "\u5B9A\u65F6\u5F85\u673A",
+    "\u5173\u673A\u5B9A\u65F6",
+    "\u4E3B\u9898",
+    "\u754C\u9762\u5E03\u5C40",
+    "\u653E\u5927\u83DC\u5355",
+    "\u7F16\u7801\u5668",
+    "\u6EDA\u52A8\u65B9\u5411",
+    "RDS",
+    "FM \u7ACB\u4F53\u58F0",
+    "FM \u5730\u533A",
+    "\u6821\u51C6",
+    "DSP \u8865\u4E01",
+    "\u8F7D\u5165 EiBi",
+    "\u56FA\u4EF6\u5347\u7EA7",
+    "USB \u4E32\u53E3",
+    "TCP \u7AEF\u53E3",
+    "\u84DD\u7259",
+    "Wi-Fi",
+    "\u5173\u4E8E"
+  ];
+  var STEP_LADDER = ["1k", "5k", "9k", "10k", "50k", "100k", "500k"];
+  var BANDS = [
+    { name: "VHF", min: 64e6, max: 108e6 },
+    { name: "ALL", min: 15e4, max: 3e7 },
+    { name: "11M", min: 256e5, max: 261e5 },
+    { name: "13M", min: 215e5, max: 219e5 },
+    { name: "15M", min: 189e5, max: 191e5 },
+    { name: "16M", min: 174e5, max: 181e5 },
+    { name: "19M", min: 151e5, max: 159e5 },
+    { name: "22M", min: 135e5, max: 139e5 },
+    { name: "25M", min: 11e6, max: 13e6 },
+    { name: "31M", min: 9e6, max: 11e6 },
+    { name: "41M", min: 7e6, max: 9e6 },
+    { name: "49M", min: 5e6, max: 7e6 },
+    { name: "60M", min: 4e6, max: 51e5 },
+    { name: "75M", min: 35e5, max: 4e6 },
+    { name: "90M", min: 3e6, max: 35e5 },
+    { name: "MW3", min: 17e5, max: 35e5 },
+    { name: "MW2", min: 495e3, max: 1701e3 },
+    { name: "MW1", min: 15e4, max: 18e5 },
+    { name: "160M", min: 18e5, max: 2e6 },
+    { name: "80M", min: 35e5, max: 4e6 },
+    { name: "40M", min: 7e6, max: 73e5 },
+    { name: "30M", min: 1e7, max: 102e5 },
+    { name: "20M", min: 14e6, max: 144e5 },
+    { name: "17M", min: 18e6, max: 182e5 },
+    { name: "15M", min: 21e6, max: 215e5 },
+    { name: "12M", min: 248e5, max: 25e6 },
+    { name: "10M", min: 28e6, max: 297e5 },
+    { name: "CB", min: 25e6, max: 28e6 }
+  ];
+  function getStrength(rssi, mode) {
+    if (mode !== 0) {
+      if (rssi <= 1) return 1;
+      if (rssi <= 2) return 2;
+      if (rssi <= 3) return 3;
+      if (rssi <= 4) return 4;
+      if (rssi <= 10) return 5;
+      if (rssi <= 16) return 6;
+      if (rssi <= 22) return 7;
+      if (rssi <= 28) return 8;
+      if (rssi <= 34) return 9;
+      if (rssi <= 44) return 10;
+      if (rssi <= 54) return 11;
+      if (rssi <= 64) return 12;
+      if (rssi <= 74) return 13;
+      if (rssi <= 84) return 14;
+      if (rssi <= 94) return 15;
+      if (rssi <= 95) return 16;
+      return 17;
+    }
+    if (rssi <= 1) return 1;
+    if (rssi <= 2) return 7;
+    if (rssi <= 8) return 8;
+    if (rssi <= 14) return 9;
+    if (rssi <= 24) return 10;
+    if (rssi <= 34) return 11;
+    if (rssi <= 44) return 12;
+    if (rssi <= 54) return 13;
+    if (rssi <= 64) return 14;
+    if (rssi <= 74) return 15;
+    if (rssi <= 76) return 16;
+    return 17;
+  }
+  function bandRange(name) {
+    return BANDS.find((b) => b.name === name) || BANDS[1];
+  }
+  var F_SMALL = '16px "DejaVu Sans Mono", "Menlo", "Consolas", monospace';
+  var F_LARGE = '24px "DejaVu Sans Mono", "Menlo", "Consolas", monospace';
+  var F_BAND = '24px "Helvetica Neue", Arial, sans-serif';
+  function px(v) {
+    return Math.round(v) + 0.5;
+  }
+  function line(ctx, x1, y1, x2, y2, c) {
+    ctx.strokeStyle = c;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    if (y1 === y2) {
+      ctx.moveTo(x1, px(y1));
+      ctx.lineTo(x2, px(y1));
+    } else if (x1 === x2) {
+      ctx.moveTo(px(x1), y1);
+      ctx.lineTo(px(x1), y2);
+    } else {
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x2, y2);
+    }
+    ctx.stroke();
+  }
+  function rect(ctx, x, y, w, h, c) {
+    ctx.fillStyle = c;
+    ctx.fillRect(Math.round(x), Math.round(y), Math.round(w), Math.round(h));
+  }
+  function tri(ctx, x1, y1, x2, y2, x3, y3, c) {
+    ctx.fillStyle = c;
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(x2, y2);
+    ctx.lineTo(x3, y3);
+    ctx.closePath();
+    ctx.fill();
+  }
+  function roundRectPath(ctx, x, y, w, h, r) {
+    const rr = Math.min(r, w / 2, h / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + rr, y);
+    ctx.arcTo(x + w, y, x + w, y + h, rr);
+    ctx.arcTo(x + w, y + h, x, y + h, rr);
+    ctx.arcTo(x, y + h, x, y, rr);
+    ctx.arcTo(x, y, x + w, y, rr);
+    ctx.closePath();
+  }
+  function roundRect(ctx, x, y, w, h, r, stroke, fill) {
+    roundRectPath(ctx, x, y, w, h, r);
+    if (fill) {
+      ctx.fillStyle = fill;
+      ctx.fill();
+    }
+    if (stroke) {
+      ctx.strokeStyle = stroke;
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+  }
+  function setFont(ctx, font, color, align, baseline) {
+    ctx.font = font;
+    ctx.fillStyle = color;
+    ctx.textAlign = align || "left";
+    ctx.textBaseline = baseline || "top";
+  }
+  var SEG_MAP = {
+    "0": "abcdef",
+    "1": "bc",
+    "2": "abged",
+    "3": "abgcd",
+    "4": "fgbc",
+    "5": "afgcd",
+    "6": "afgecd",
+    "7": "abc",
+    "8": "abcdefg",
+    "9": "abcdfg",
+    "-": "g",
+    " ": ""
+  };
+  function hseg(ctx, x, y, len, t, c) {
+    ctx.fillStyle = c;
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    ctx.lineTo(x + t / 2, y - t / 2);
+    ctx.lineTo(x + len - t / 2, y - t / 2);
+    ctx.lineTo(x + len, y);
+    ctx.lineTo(x + len - t / 2, y + t / 2);
+    ctx.lineTo(x + t / 2, y + t / 2);
+    ctx.closePath();
+    ctx.fill();
+  }
+  function vseg(ctx, x, y, len, t, c) {
+    ctx.fillStyle = c;
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    ctx.lineTo(x + t / 2, y + t / 2);
+    ctx.lineTo(x + t / 2, y + len - t / 2);
+    ctx.lineTo(x, y + len);
+    ctx.lineTo(x - t / 2, y + len - t / 2);
+    ctx.lineTo(x - t / 2, y + t / 2);
+    ctx.closePath();
+    ctx.fill();
+  }
+  function seg7char(ctx, x, y0, ch, w, h, color) {
+    const segs = SEG_MAP[ch];
+    if (segs === void 0) return;
+    const t = Math.round(h * 0.11);
+    const gap = 1.5;
+    const top = y0 + t / 2;
+    const mid = y0 + h / 2;
+    const bot = y0 + h - t / 2;
+    const left = x + t / 2;
+    const right = x + w - t / 2;
+    const hlen = w - t;
+    const vlen = h / 2 - t / 2 - gap;
+    if (segs.includes("a")) hseg(ctx, left, top, hlen, t, color);
+    if (segs.includes("g")) hseg(ctx, left, mid, hlen, t, color);
+    if (segs.includes("d")) hseg(ctx, left, bot, hlen, t, color);
+    if (segs.includes("f")) vseg(ctx, left, top + t / 2 + gap, vlen, t, color);
+    if (segs.includes("b")) vseg(ctx, right, top + t / 2 + gap, vlen, t, color);
+    if (segs.includes("e")) vseg(ctx, left, mid + gap, vlen, t, color);
+    if (segs.includes("c")) vseg(ctx, right, mid + gap, vlen, t, color);
+  }
+  function drawDigits(ctx, str, xRight, midY, color) {
+    const h = 48;
+    const DOT_W = 12;
+    const DIGIT_W = 32;
+    const y0 = midY - h / 2;
+    let total = 0;
+    for (const c of str) total += c === "." ? DOT_W : DIGIT_W;
+    let x = xRight - total;
+    for (const c of str) {
+      if (c === ".") {
+        rect(ctx, x + 2, y0 + h - 7, 6, 6, color);
+        x += DOT_W;
+      } else {
+        seg7char(ctx, x, y0, c, DIGIT_W, h, color);
+        x += DIGIT_W;
+      }
+    }
+  }
+  function drawSaveIndicator(ctx, th, x, y) {
+    rect(ctx, x + 3, y + 2, 3, 5, th.save_icon);
+    tri(ctx, x + 1, y + 7, x + 7, y + 7, x + 4, y + 10, th.save_icon);
+    line(ctx, x, y + 12, x, y + 13, th.save_icon);
+    line(ctx, x, y + 13, x + 8, y + 13, th.save_icon);
+    line(ctx, x + 8, y + 13, x + 8, y + 12, th.save_icon);
+  }
+  function drawBleIndicator(ctx, th, x, y, connected) {
+    const c = connected ? th.rf_icon_conn : th.rf_icon;
+    line(ctx, x + 3, y + 1, x + 3, y + 13, c);
+    line(ctx, x + 3, y + 1, x + 6, y + 4, c);
+    line(ctx, x + 6, y + 4, x, y + 10, c);
+    line(ctx, x, y + 4, x + 6, y + 10, c);
+    line(ctx, x + 6, y + 10, x + 3, y + 13, c);
+  }
+  function drawWiFiIndicator(ctx, th, x, y, connected) {
+    const c = connected ? th.rf_icon_conn : th.rf_icon;
+    ctx.strokeStyle = c;
+    ctx.lineWidth = 3;
+    const set = [[14, 13], [9, 8], [4, 3]];
+    for (const [rx, ry] of set) {
+      ctx.beginPath();
+      ctx.ellipse(x, y + 15, rx, ry, 0, 240 * Math.PI / 180, 300 * Math.PI / 180);
+      ctx.stroke();
+    }
+  }
+  function drawBattery(ctx, th, x, y, volts) {
+    roundRect(ctx, x, y + 1, 28, 14, 3, th.batt_border, null);
+    line(ctx, x + 29, y + 5, x + 29, y + 10, th.batt_border);
+    line(ctx, x + 30, y + 6, x + 30, y + 9, th.batt_border);
+    setFont(ctx, F_SMALL, th.batt_voltage, "right", "top");
+    if (volts > 4.3) {
+      roundRect(ctx, x + 2, y + 3, 24, 10, 2, null, th.batt_charge);
+      ctx.fillStyle = th.batt_icon;
+      ctx.fillRect(x + 19, y + 7, 10, 2);
+      tri(ctx, x + 16, y + 1, x + 13, y + 7, x + 9, y + 8, th.batt_icon);
+      tri(ctx, x + 14, y + 7, x + 19, y + 7, x + 12, y + 14, th.batt_icon);
+      return false;
+    }
+    let level = 24;
+    let color = th.batt_full;
+    const pct = volts;
+    if (pct < 3.68) {
+      level = 6;
+      color = th.batt_low;
+    } else if (pct < 3.78) {
+      level = 12;
+      color = th.batt_full;
+    } else if (pct < 3.88) {
+      level = 18;
+      color = th.batt_full;
+    }
+    roundRect(ctx, x + 2, y + 3, level, 10, 2, null, color);
+    ctx.fillText(volts.toFixed(2) + "V", x - 3, y);
+    return true;
+  }
+  function drawBandAndMode(ctx, th, band, mode, x, y, vfoIdx) {
+    setFont(ctx, F_BAND, th.band_text, "center", "top");
+    ctx.fillText(band, x, y);
+    const bandW = ctx.measureText(band).width;
+    setFont(ctx, F_SMALL, th.mode_text, "left", "top");
+    ctx.fillText(mode, x + bandW / 2 + 12, y + 8);
+    const modeW = ctx.measureText(mode).width;
+    roundRect(ctx, x + bandW / 2 + 8, y + 7, modeW + 8, 17, 4, th.mode_border, null);
+    const vfoX = x + bandW / 2 + modeW + 20;
+    roundRect(ctx, vfoX, y + 7, 17, 17, 4, th.mode_border, null);
+    setFont(ctx, F_SMALL, th.mode_text, "center", "top");
+    ctx.fillText(vfoIdx ? "B" : "A", vfoX + 9, y + 8);
+  }
+  function drawFrequency(ctx, th, st) {
+    const x = LAYOUT.FREQ_X;
+    const y = LAYOUT.FREQ_Y;
+    const ux = LAYOUT.FUNIT_X;
+    const uy = LAYOUT.FUNIT_Y;
+    const freq = st.freq;
+    if (st.mode === 0) {
+      drawDigits(ctx, (freq / 1e6).toFixed(2), x, y, th.freq_text);
+      setFont(ctx, F_BAND, th.funit_text, "left", "alphabetic");
+      ctx.fillText("MHz", ux, uy + 17);
+    } else {
+      if (st.mode === 1 || st.mode === 2) {
+        drawDigits(ctx, String(Math.floor(freq / 1e3)).padStart(3, " "), x, y, th.freq_text);
+        setFont(ctx, F_LARGE, th.freq_text, "left", "middle");
+        ctx.fillText("." + String(freq % 1e3).padStart(3, "0"), 4 + x, 17 + y);
+      } else {
+        drawDigits(ctx, String(Math.floor(freq / 1e3)), x, y, th.freq_text);
+        setFont(ctx, F_LARGE, th.freq_text, "left", "middle");
+        ctx.fillText(".000", 4 + x, 17 + y);
+      }
+      setFont(ctx, F_BAND, th.funit_text, "left", "alphabetic");
+      ctx.fillText("kHz", ux, uy + 19);
+    }
+  }
+  function drawStationName(ctx, th, name, x, y) {
+    setFont(ctx, F_LARGE, th.rds_text, "center", "top");
+    ctx.fillText(name, x, y);
+  }
+  function drawInfo(ctx, th, st, x, y) {
+    roundRect(ctx, 1 + x, 1 + y, 86, 110, 4, th.box_border, th.box_bg);
+    const rows = [
+      ["\u6B65\u8FDB:", st.stepDesc || "5k"],
+      ["\u5E26\u5BBD:", st.bwDesc || "3.0k"],
+      st.agcOn ? ["AGC:", "\u5F00"] : ["\u8870\u51CF:", String(st.agcNdx).padStart(2, "0")],
+      ["\u97F3\u91CF:", st.muted ? "\u9759\u97F3" : String(st.volume)],
+      ["AVC:", st.mode === 0 ? "n/a" : st.avcDesc && st.avcDesc !== "--" ? st.avcDesc : "--"]
+    ];
+    if (st.offTimer > 0) rows.push(["\u5173\u673A:", String(st.offTimer)]);
+    else if (st.standbyTimer > 0) rows.push(["\u5F85\u673A:", String(st.standbyTimer)]);
+    else if (st.timeText) rows.push([st.timeLabel || "\u65F6\u95F4:", st.timeText]);
+    setFont(ctx, F_SMALL, th.box_text, "left", "middle");
+    rows.forEach((row, i) => {
+      const ry = 64 + y + (i - 3) * 16;
+      ctx.fillText(row[0], 6 + x, ry);
+      ctx.fillText(row[1], 48 + x, ry);
+    });
+  }
+  function drawMenuPanel(ctx, th, st, title, items, idx) {
+    const x = SB_X, y = SB_Y, sx = LAYOUT.MENU_DX;
+    const cx = 40 + x + sx / 2;
+    roundRect(ctx, 1 + x, 1 + y, 76 + sx, 110, 4, th.menu_border, th.menu_bg);
+    setFont(ctx, F_SMALL, th.menu_hdr, "center", "middle");
+    ctx.fillText(title, cx, 12 + y);
+    line(ctx, 1 + x, 23 + y, 76 + sx + x, 23 + y, th.menu_border);
+    ctx.fillStyle = th.menu_hl_bg;
+    ctx.beginPath();
+    roundRectPath(ctx, 6 + x, 24 + y + 32, 66 + sx, 16, 2);
+    ctx.fill();
+    const count = items.length;
+    for (let i = -2; i <= 2; i++) {
+      if (count < 5 && (idx + i < 0 || idx + i >= count)) continue;
+      const item = items[((idx + i) % count + count) % count];
+      const sel = i === 0;
+      setFont(ctx, F_SMALL, sel ? th.menu_hl_text : th.menu_item, "center", "middle");
+      ctx.fillText(item, cx, 64 + y + i * 16);
+    }
+  }
+  var PANEL_TITLES = {
+    bw: "\u5E26\u5BBD",
+    avc: "AVC",
+    squelch: "\u9759\u566A",
+    memory: "\u8BB0\u5FC6",
+    seek: "\u641C\u53F0",
+    scan: "\u626B\u9891",
+    vfo: "VFO A/B",
+    softmute: "\u8F6F\u9759\u97F3",
+    brt: "\u4EAE\u5EA6",
+    datetime: "\u65E5\u671F\u65F6\u95F4",
+    utcoffset: "UTC \u65F6\u533A",
+    sleep: "\u4F11\u7720\u5B9A\u65F6",
+    sleepmode: "\u4F11\u7720\u65B9\u5F0F",
+    offtimer: "\u5173\u673A\u5B9A\u65F6",
+    stbytimer: "\u5B9A\u65F6\u5F85\u673A",
+    encoder: "\u7F16\u7801\u5668",
+    theme: "\u4E3B\u9898",
+    ui: "\u754C\u9762\u5E03\u5C40",
+    zoom: "\u653E\u5927\u83DC\u5355",
+    scroll: "\u6EDA\u52A8\u65B9\u5411",
+    rds: "RDS",
+    fm_stereo: "FM \u7ACB\u4F53\u58F0",
+    fm_region: "FM \u5730\u533A",
+    cal: "\u6821\u51C6",
+    dsp: "DSP \u8865\u4E01",
+    eibi: "\u8F7D\u5165 EiBi",
+    updatefw: "\u56FA\u4EF6\u5347\u7EA7",
+    usbmode: "USB \u4E32\u53E3",
+    tcpmode: "TCP \u7AEF\u53E3",
+    blemode: "\u84DD\u7259",
+    wifimode: "Wi-Fi",
+    about: "\u5173\u4E8E"
+  };
+  function drawCommonPanel(ctx, th, title) {
+    const x = SB_X, y = SB_Y, sx = LAYOUT.MENU_DX;
+    roundRect(ctx, 1 + x, 1 + y, 76 + sx, 110, 4, th.menu_border, th.menu_bg);
+    setFont(ctx, F_SMALL, th.menu_hdr, "center", "middle");
+    ctx.fillText(title, 40 + x + sx / 2, 12 + y);
+    line(ctx, 1 + x, 23 + y, 76 + sx + x, 23 + y, th.menu_border);
+  }
+  var LIST_PANELS = {
+    ui: { title: "\u754C\u9762\u5E03\u5C40", items: ["\u9ED8\u8BA4", "S-Meter"] },
+    sleepmode: { title: "\u4F11\u7720\u65B9\u5F0F", items: ["\u9501\u5B9A", "\u89E3\u9501", "CPU \u7761\u7720", "BLE \u5F85\u673A"] },
+    fm_stereo: { title: "FM \u7ACB\u4F53\u58F0", items: ["\u81EA\u52A8", "\u5355\u58F0\u9053"] },
+    usbmode: { title: "USB \u4E32\u53E3", items: ["\u5173", "Ad hoc"] },
+    tcpmode: { title: "TCP \u7AEF\u53E3", items: ["\u5173", "Ad hoc"] },
+    blemode: { title: "\u84DD\u7259", items: ["\u5173", "Ad hoc", "HID", "\u6E05\u9664\u914D\u5BF9"] },
+    wifimode: { title: "Wi-Fi", items: ["\u5173", "\u4EC5 AP", "AP+\u8FDE\u63A5", "\u8FDE\u63A5", "\u4EC5\u5BF9\u65F6"] }
+  };
+  function drawSideBar(ctx, th, st) {
+    const ui = st.ui || "info";
+    if (ui === "info" || !ui) {
+      drawInfo(ctx, th, st, SB_X, SB_Y);
+      return;
+    }
+    const list = LIST_PANELS[ui];
+    if (list) {
+      drawMenuPanel(ctx, th, st, list.title, list.items, st.option || 0);
+      return;
+    }
+    switch (ui) {
+      case "menu":
+        drawMenuPanel(ctx, th, st, "\u83DC\u5355", MENU_ITEMS, st.menuIdx || 0);
+        break;
+      case "settings":
+        drawMenuPanel(ctx, th, st, "\u8BBE\u7F6E", SETTINGS_ITEMS, st.settingsIdx || 0);
+        break;
+      case "mode":
+        drawMenuPanel(ctx, th, st, "\u6A21\u5F0F", MODE_DESC, st.mode ?? 3);
+        break;
+      case "band": {
+        const names = BANDS.map((b) => b.name);
+        drawMenuPanel(ctx, th, st, "\u6CE2\u6BB5", names, Math.max(0, names.indexOf(st.bandName)));
+        break;
+      }
+      case "step": {
+        const list2 = st.stepList && st.stepList.length ? st.stepList : STEP_LADDER;
+        const cur = list2.findIndex((s) => s.toLowerCase() === String(st.stepDesc || "").toLowerCase());
+        drawMenuPanel(ctx, th, st, "\u6B65\u8FDB", list2, Math.max(0, cur));
+        break;
+      }
+      case "volume": {
+        drawCommonPanel(ctx, th, "\u97F3\u91CF");
+        const cx = 40 + SB_X + LAYOUT.MENU_DX / 2;
+        const cy = 66 + SB_Y;
+        setFont(ctx, '32px "DejaVu Sans Mono", "Menlo", monospace', th.menu_param, "center", "middle");
+        ctx.fillText(String(st.volume ?? 0), cx, cy + 2);
+        if (st.muted) {
+          for (let i = -3; i < 4; i++) {
+            line(ctx, cx + 30 + i, cy - 30 + i, cx - 30 + i, cy + 30 + i, th.menu_param);
+          }
+        }
+        break;
+      }
+      case "agc": {
+        drawCommonPanel(ctx, th, "AGC/ATTN");
+        const cx = 40 + SB_X + LAYOUT.MENU_DX / 2;
+        setFont(ctx, F_SMALL, th.menu_param, "center", "middle");
+        if (st.agcOn) {
+          ctx.fillText("AGC", cx, 48 + SB_Y);
+          ctx.fillText("\u5F00", cx, 72 + SB_Y);
+        } else {
+          ctx.fillText(String(st.agcNdx).padStart(2, "0"), cx, 66 + SB_Y);
+        }
+        break;
+      }
+      default: {
+        drawCommonPanel(ctx, th, PANEL_TITLES[ui] || "\u83DC\u5355");
+        const cx = 40 + SB_X + LAYOUT.MENU_DX / 2;
+        const timerValue = ui === "offtimer" ? st.offTimer : ui === "stbytimer" ? st.standbyTimer : ui === "sleep" ? st.sleepTimer : void 0;
+        if (timerValue !== void 0) {
+          setFont(ctx, F_LARGE, th.menu_param, "center", "middle");
+          if (timerValue) {
+            ctx.fillText(String(timerValue), cx, 60 + SB_Y);
+            setFont(ctx, F_SMALL, th.menu_param, "center", "middle");
+            ctx.fillText(ui === "sleep" ? "\u79D2" : "\u5206", cx, 88 + SB_Y);
+          } else {
+            ctx.fillText("\u5173", cx, 60 + SB_Y);
+          }
+          break;
+        }
+        if (ui === "encoder" && st.encoderHalfStep !== void 0) {
+          setFont(ctx, F_LARGE, th.menu_param, "center", "middle");
+          ctx.fillText(st.encoderHalfStep ? "30\u5B9A\u4F4D" : "20\u5B9A\u4F4D", cx, 58 + SB_Y);
+          setFont(ctx, F_SMALL, th.menu_item, "center", "middle");
+          ctx.fillText(st.encoderHalfStep ? "15\u8109\u51B2" : "20\u8109\u51B2", cx, 88 + SB_Y);
+          break;
+        }
+        setFont(ctx, F_SMALL, th.menu_param, "center", "middle");
+        const value = ui === "bw" ? st.bwDesc || "--" : ui === "avc" ? st.avcDesc || "--" : ui === "vfo" ? st.vfoIdx ? "B" : "A" : ui === "squelch" ? String(st.volume ?? 0) : ui === "memory" ? String(st.memoryIdx ?? 1).padStart(2, "0") : ui === "brt" ? String(st.backlight ?? "--") : ui === "cal" ? String(st.calibration ?? "--") : "--";
+        ctx.fillText(String(value), cx, 66 + SB_Y);
+        break;
+      }
+    }
+  }
+  function drawSMeter(ctx, th, strength, x, y) {
+    tri(ctx, x + 1, y + 1, x + 11, y + 1, x + 6, y + 6, th.smeter_icon);
+    line(ctx, x + 6, y + 1, x + 6, y + 14, th.smeter_icon);
+    for (let i = 0; i < 17; i++) {
+      let c = th.smeter_bar_empty;
+      if (i < 10 && i < strength) c = th.smeter_bar;
+      else if (i < strength) c = th.smeter_bar_plus;
+      rect(ctx, 15 + x + i * 4, 2 + y, 2, 12, c);
+    }
+  }
+  function drawScale(ctx, th, st) {
+    tri(ctx, 156, 120, 160, 130, 164, 120, th.scale_pointer);
+    line(ctx, 160, 130, 160, 169, th.scale_pointer);
+    const step = st.mode === 0 ? 1e5 : 1e4;
+    const slack = 3;
+    const freq = st.freq;
+    const offset = Math.floor(freq % step * 8 / step) + slack * 8;
+    let tickFreq = (Math.floor(freq / step) - 20 - slack) * step;
+    const range = bandRange(st.bandName);
+    setFont(ctx, F_SMALL, th.scale_text, "center", "middle");
+    for (let i = 0; i < slack + 41 + slack; i++, tickFreq += step) {
+      const x = i * 8 - offset;
+      if (tickFreq < range.min || tickFreq > range.max) continue;
+      const isPtr = i === 20 && (!offset || !(tickFreq % (5 * step)) && offset === 1);
+      const c = isPtr ? th.scale_pointer : th.scale_line;
+      if (tickFreq % (10 * step) === 0) {
+        line(ctx, x, 169, x, 150, c);
+        line(ctx, x + 1, 169, x + 1, 150, c);
+        let label;
+        if (st.mode === 0) label = (tickFreq / 1e6).toFixed(1);
+        else if (tickFreq >= 1e6) label = (tickFreq / 1e6).toFixed(3);
+        else label = String(Math.round(tickFreq / 1e3));
+        ctx.fillStyle = th.scale_text;
+        ctx.fillText(label, x, 140);
+      } else if (tickFreq % (5 * step) === 0) {
+        line(ctx, x, 169, x, 155, c);
+        line(ctx, x + 1, 169, x + 1, 155, c);
+      } else {
+        line(ctx, x, 169, x, 160, c);
+      }
+    }
+  }
+  function getInterpolatedStrength(rssi, mode) {
+    const amT = [1, 2, 3, 4, 10, 16, 22, 28, 34, 44, 54, 64, 74, 84, 94, 95, 96];
+    const amV = [1, 4, 7, 10, 13, 16, 19, 22, 25, 28, 31, 34, 37, 40, 43, 46, 49];
+    const fmT = [1, 2, 8, 14, 24, 34, 44, 54, 64, 74, 76, 77];
+    const fmV = [1, 19, 22, 25, 28, 31, 34, 37, 40, 43, 46, 49];
+    const isFM = mode === 0;
+    const thresholds = isFM ? fmT : amT;
+    const values = isFM ? fmV : amV;
+    for (let i = 0; i < thresholds.length; i++) {
+      if (rssi <= thresholds[i]) {
+        if (!i) return values[i];
+        const interval = thresholds[i] - thresholds[i - 1];
+        if (!interval) return values[i];
+        const pos = (rssi - thresholds[i - 1]) / interval;
+        return Math.round(values[i - 1] + pos * (values[i] - values[i - 1]));
+      }
+    }
+    return values[values.length - 1];
+  }
+  function drawSmallScale(ctx, th, st, y) {
+    const range = bandRange(st.bandName);
+    const x0 = 51;
+    const x1 = 269;
+    for (let i = x0 + 3; i <= x1 - 3; i += 2) {
+      rect(ctx, i, y, 1, 1, th.scale_line);
+    }
+    setFont(ctx, F_SMALL, th.scale_text, "center", "middle");
+    ctx.strokeStyle = th.scale_line;
+    ctx.beginPath();
+    ctx.arc(x0, y, 3, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(x1, y, 3, 0, Math.PI * 2);
+    ctx.stroke();
+    const freq = Math.min(Math.max(st.freq, range.min), range.max);
+    const px0 = Math.round(x0 + (x1 - x0) * (freq - range.min) / (range.max - range.min || 1));
+    ctx.fillStyle = th.scale_pointer;
+    ctx.beginPath();
+    ctx.arc(px0, y, 3, 0, Math.PI * 2);
+    ctx.fill();
+    const fmt = (f) => st.mode === 0 ? (f / 1e6).toFixed(2) : String(Math.round(f / 1e3));
+    setFont(ctx, F_SMALL, th.scale_text, "center", "middle");
+    ctx.fillText(fmt(range.min), x0 - 27, y);
+    ctx.fillText(fmt(range.max), x1 + 27, y);
+  }
+  function drawAltStereoIndicator(ctx, th, x, y, stereo) {
+    if (!stereo) return;
+    ctx.strokeStyle = th.stereo_icon;
+    ctx.beginPath();
+    ctx.arc(x - 4, y, 7, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(x + 4, y, 7, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+  function drawLargeSMeter(ctx, th, rssi, strength, x, y) {
+    setFont(ctx, F_SMALL, th.scale_text, "center", "top");
+    let lastX = x;
+    for (let i = 0; i < 16; i++) {
+      if (i % 2) {
+        const textX = x + i * 15 - 13;
+        let label = null;
+        if (i < 10) label = String(i);
+        else if (i === 11) label = "+20";
+        else if (i === 13) label = "+40";
+        else if (i === 15) label = "+60";
+        if (label) {
+          ctx.fillStyle = th.scale_text;
+          ctx.fillText(label, textX, 20 + y);
+          const w = ctx.measureText(label).width;
+          for (let p = lastX; p < textX - w / 2; p++) {
+            if (p & 1) rect(ctx, p, 28 + y, 1, 1, th.scale_line);
+          }
+          lastX = textX + w / 2;
+        }
+      }
+    }
+    for (let p = lastX; p <= x + 15 * 16 + 2; p++) {
+      if (p & 1) rect(ctx, p, 28 + y, 1, 1, th.scale_line);
+    }
+    setFont(ctx, F_SMALL, th.scale_text, "left", "bottom");
+    ctx.fillText("S", x - 10, 36 + y);
+    setFont(ctx, F_LARGE, th.scale_text, "right", "bottom");
+    ctx.fillText(String(rssi), x - 15, 40 + y);
+    for (let i = 0; i < 49; i++) {
+      let c = th.smeter_bar_empty;
+      if (i < 28 && i < strength) c = th.smeter_bar;
+      else if (i < strength) c = th.smeter_bar_plus;
+      rect(ctx, x + i * 5, 11 + y, 3, 10, c);
+    }
+  }
+  function drawLargeSNMeter(ctx, th, snr, x, y) {
+    setFont(ctx, F_SMALL, th.scale_text, "left", "bottom");
+    ctx.fillText("N", x - 10, 12 + y);
+    setFont(ctx, F_LARGE, th.scale_text, "right", "bottom");
+    ctx.fillText(String(snr), x - 15, 16 + y);
+    const bars = Math.floor(snr * 45 / 128);
+    for (let i = 0; i < 49; i++) {
+      rect(ctx, x + i * 5, y - 1, 3, 10, i < bars ? th.smeter_bar : th.smeter_bar_empty);
+    }
+  }
+  function renderScreen(ctx, st) {
+    const th = st.theme || THEME_DEFAULT;
+    const alt = (st.uiLayout ?? 0) === 1;
+    SB_X = alt ? LAYOUT.ALT_MENU_X : LAYOUT.MENU_X;
+    SB_Y = alt ? LAYOUT.ALT_MENU_Y : LAYOUT.MENU_Y;
+    ctx.save();
+    ctx.clearRect(0, 0, SW, SH);
+    rect(ctx, 0, 0, SW, SH, th.bg);
+    if (st.sleep) {
+      ctx.restore();
+      return;
+    }
+    if (st.save) drawSaveIndicator(ctx, th, LAYOUT.SAVE_X, LAYOUT.SAVE_Y);
+    if (st.ble) drawBleIndicator(ctx, th, LAYOUT.BLE_X, LAYOUT.BLE_Y, st.bleConnected);
+    const hasVolt = drawBattery(ctx, th, LAYOUT.BATT_X, LAYOUT.BATT_Y, st.battery ?? 4.02);
+    if (st.wifi) {
+      drawWiFiIndicator(ctx, th, hasVolt ? LAYOUT.WIFI_X : LAYOUT.BATT_X - 13, LAYOUT.WIFI_Y, true);
+    }
+    drawBandAndMode(ctx, th, st.bandName || "SW", MODE_DESC[st.mode ?? 3], LAYOUT.BAND_X, LAYOUT.BAND_Y, st.vfoIdx || 0);
+    drawFrequency(ctx, th, st);
+    if (st.stationName) drawStationName(ctx, th, st.stationName, LAYOUT.RDS_X, LAYOUT.RDS_Y);
+    if (alt) {
+      drawSmallScale(ctx, th, st, 120);
+      drawSideBar(ctx, th, st);
+      drawAltStereoIndicator(ctx, th, LAYOUT.ALT_STEREO_X, LAYOUT.ALT_STEREO_Y, !!st.stereo);
+      if (st.ui !== "scan") {
+        const rssi = st.rssi ?? 0;
+        const snr = st.snr ?? 0;
+        drawLargeSNMeter(ctx, th, snr, LAYOUT.ALT_METER_X, LAYOUT.ALT_METER_Y);
+        drawLargeSMeter(ctx, th, rssi, getInterpolatedStrength(rssi, st.mode ?? 3), LAYOUT.ALT_METER_X, LAYOUT.ALT_METER_Y);
+      }
+    } else {
+      drawSideBar(ctx, th, st);
+      drawSMeter(ctx, th, getStrength(st.rssi ?? 0, st.mode ?? 3), LAYOUT.METER_X, LAYOUT.METER_Y);
+      if (st.stereo) rect(ctx, 15, 7, 66, 2, th.bg);
+      drawScale(ctx, th, st);
+    }
+    ctx.restore();
+  }
+  var DEFAULT_STATE = {
+    freq: 15e6,
+    mode: 3,
+    bandName: "SW",
+    rssi: 48,
+    snr: 22,
+    volume: 20,
+    agcNdx: 12,
+    agcOn: false,
+    stepDesc: "5k",
+    bwDesc: "3.0k",
+    avcDesc: "12dB",
+    battery: 4.02,
+    ble: true,
+    bleConnected: true,
+    wifi: false,
+    save: false,
+    sleep: false,
+    stereo: false,
+    muted: false,
+    stationName: "",
+    vfoIdx: 0,
+    ui: "info",
+    // info 信息框 / menu 主菜单 / volume 音量条 / mode / band / step / bw / agc / settings …
+    uiLayout: 0,
+    // 0 默认布局 / 1 S-Meter 布局（固件 uiLayoutIdx）
+    menuIdx: 0,
+    settingsIdx: 0,
+    timeLabel: "\u65F6\u95F4:",
+    timeText: void 0
+    // 固件对时后才回报，没有就整行不画
+  };
+
+  // preview/preview.jsx
+  var base = {
+    ...DEFAULT_STATE,
+    freq: 15e6,
+    mode: 3,
+    bandName: "SW",
+    rssi: 62,
+    snr: 24,
+    volume: 28,
+    agcNdx: 0,
+    agcOn: true,
+    stepDesc: "5k",
+    bwDesc: "3.0k",
+    battery: 4.02,
+    muted: false
+  };
+  var fmBase = {
+    ...base,
+    bandName: "VHF",
+    mode: 0,
+    freq: 97e6,
+    rssi: 39,
+    snr: 18,
+    volume: 30,
+    stepDesc: "100k",
+    bwDesc: "Auto",
+    agcOn: true,
+    avcDesc: "n/a",
+    battery: 4.12
+  };
+  var CASES = [
+    {
+      title: "\u2605 S-Meter \u5E03\u5C40\uFF08\u7167\u4F60\u7684\u7167\u7247\u590D\u539F\uFF09",
+      note: "uiLayout=1 \xB7 \u5DE6\u4FA7\u4FE1\u606F\u6846\u8D34\u9876\uFF08y=0\uFF09\u3001\u4E2D\u95F4 64.00\u2013108.00 \u5C0F\u523B\u5EA6\u5C3A\u3001\u5E95\u90E8 S/N \u53CC\u6761\u8868\u3002RSSI 39 \u5728 FM \u8868\u63D2\u503C \u2192 36 \u683C\uFF08\u7EFF 28 + \u7EA2 8\uFF09\uFF0CSNR 18 \u2192 6 \u683C\uFF0C\u4E0E\u4F60\u7167\u7247\u5B8C\u5168\u4E00\u81F4\u3002",
+      st: { ...fmBase, ui: "info", uiLayout: 1 }
+    },
+    {
+      title: "\u9ED8\u8BA4\u5E03\u5C40 \xB7 \u540C\u4E00\u72B6\u6001",
+      note: "uiLayout=0 \xB7 \u540C\u4E00\u7EC4\u6570\u503C\u6362\u56DE\u9ED8\u8BA4\u6392\u7248\uFF1A\u5DE6\u9762\u677F\u4E0B\u79FB 18px\u3001\u5E95\u90E8\u6362\u6210\u9891\u7387\u6E38\u6807\u5C3A\u3001S \u8868\u7F29\u5230\u5DE6\u4E0A\u89D2",
+      st: { ...fmBase, ui: "info", uiLayout: 0 }
+    },
+    {
+      title: "S-Meter \u5E03\u5C40 \xB7 FM \u7ACB\u4F53\u58F0",
+      note: "\u6536\u5230\u7ACB\u4F53\u58F0\u5BFC\u9891\u65F6\uFF0C\u9891\u7387\u53F3\u4FA7\u663E\u793A\u300C\u53CC\u73AF\u300D\u7ACB\u4F53\u58F0\u6307\u793A\uFF08ALT_STEREO 251,24\uFF09\uFF0C\u4E0E\u9ED8\u8BA4\u5E03\u5C40\u7684\u5C0F\u56FE\u6807\u4E0D\u540C",
+      st: { ...fmBase, ui: "info", uiLayout: 1, stereo: true }
+    },
+    {
+      title: "\u754C\u9762\u5E03\u5C40\u9762\u677F",
+      note: "CMD_UI \xB7 \u5C31\u662F\u5207\u300C\u9ED8\u8BA4 / S-Meter\u300D\u7684\u90A3\u4E00\u5C4F\uFF0C\u9AD8\u4EAE\u9879\u7531\u56FA\u4EF6\u56DE\u62A5\uFF08st.option\uFF09",
+      st: { ...fmBase, ui: "ui", uiLayout: 1, option: 1 }
+    },
+    {
+      title: "S-Meter \u5E03\u5C40 \xB7 \u97F3\u91CF\u9762\u677F",
+      note: "\u540C\u4E00\u5E03\u5C40\u4E0B\u4FA7\u8FB9\u680F\u6574\u4F53\u4E0A\u79FB\u5230 y=0\uFF0C\u9762\u677F\u4E0D\u4F1A\u538B\u5728\u523B\u5EA6\u5C3A\u4E0A",
+      st: { ...fmBase, ui: "volume", uiLayout: 1 }
+    },
+    {
+      title: "\u4FE1\u606F\u6846\uFF08idle\uFF09",
+      note: "CMD_NONE \xB7 \u5DE6\u4FA7\u663E\u793A\u6B65\u8FDB/\u5E26\u5BBD/AGC\uFF0C\u53F3\u4E0B\u89D2 SNR / RSSI",
+      st: { ...base, ui: "info" }
+    },
+    {
+      title: "\u4E3B\u83DC\u5355",
+      note: "CMD_MENU \xB7 \u5149\u6807\u9ED8\u8BA4\u505C\u5728\u7B2C 3 \u9879\u300C\u97F3\u91CF\u300D",
+      st: { ...base, ui: "menu", menuIdx: 2 }
+    },
+    {
+      title: "\u8BBE\u7F6E\u83DC\u5355 \xB7 \u7B2C 6 \u9879",
+      note: "\u9AD8\u4EAE\u300C\u5B9A\u65F6\u5F85\u673A\u300D\u2014\u2014\u8FD9\u4E00\u9879\u65E7\u7248 App \u6574\u4E2A\u6F0F\u6389\uFF0C\u5BFC\u81F4\u4ECE\u7B2C 5 \u9879\u8D77\u5168\u90E8\u9519\u4F4D",
+      st: { ...base, ui: "settings", settingsIdx: 5 }
+    },
+    {
+      title: "\u5B9A\u65F6\u5F85\u673A\u9762\u677F",
+      note: "CMD_STBYTIMER \xB7 \u5927\u5B57\u5269\u4F59\u5206\u949F + \u5C0F\u5B57\u300C\u5206\u300D\uFF0C\u4E3A 0 \u65F6\u663E\u793A\u300C\u5173\u300D",
+      st: { ...base, ui: "stbytimer", standbyTimer: 35 }
+    },
+    {
+      title: "\u7F16\u7801\u5668\u9762\u677F",
+      note: "CMD_ENCODER \xB7 \u5927\u5B57\u6863\u4F4D + \u5C0F\u5B57\u8109\u51B2\u6570\uFF08\u65E7\u7248 App \u6CA1\u6709\u8FD9\u4E00\u9879\uFF09",
+      st: { ...base, ui: "encoder", encoderHalfStep: true }
+    },
+    {
+      title: "\u4EAE\u5EA6\u9762\u677F",
+      note: "CMD_BRT \xB7 \u80CC\u5149\u503C\u6539\u4E3A\u56FA\u4EF6\u5B9E\u6D4B\uFF0C\u4E0D\u518D\u662F\u5199\u6B7B\u7684 5",
+      st: { ...base, ui: "brt", backlight: 7 }
+    },
+    {
+      title: "\u9759\u97F3 + \u97F3\u91CF",
+      note: "CMD_VOLUME \xB7 \u9759\u97F3\u65F6\u6570\u5B57\u4E0A\u5212 7 \u9053\u659C\u7EBF",
+      st: { ...base, ui: "volume", volume: 28, muted: true }
+    },
+    {
+      title: "\u4F11\u7720\u4E2D",
+      note: "\u771F\u673A\u7184\u5C4F\uFF0CApp \u540C\u6B65\u9ED1\u5C4F\uFF08\u4E0D\u662F\u5361\u4F4F\uFF0C\u662F\u72B6\u6001\u4E00\u81F4\uFF09",
+      st: { ...base, ui: "info", sleep: true }
+    }
+  ];
+  function buildCard({ title, note, st }) {
+    const wrap = document.createElement("section");
+    wrap.className = "card";
+    const h = document.createElement("h2");
+    h.textContent = title;
+    wrap.appendChild(h);
+    const cv = document.createElement("canvas");
+    cv.width = 320 * 2;
+    cv.height = 170 * 2;
+    cv.className = "screen";
+    const ctx = cv.getContext("2d");
+    ctx.setTransform(2, 0, 0, 2, 0, 0);
+    renderScreen(ctx, st);
+    wrap.appendChild(cv);
+    const p = document.createElement("p");
+    p.textContent = note;
+    wrap.appendChild(p);
+    return wrap;
+  }
+  var root = document.getElementById("grid");
+  CASES.forEach((c) => root.appendChild(buildCard(c)));
+})();
+</script>
+</body></html>

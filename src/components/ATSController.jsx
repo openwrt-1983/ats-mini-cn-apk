@@ -36,6 +36,8 @@ export default function ATSController() {
     memory: '---',
   });
   const [error, setError] = useState(null);
+  // 固件回报的界面状态（currentCmd / 光标 / 休眠 / 定时器等）。旧固件恒为 null。
+  const [firmwareUi, setFirmwareUi] = useState(null);
   // 收音机里存储的电台（'#槽位,波段,频率,模式[,名称]' 行）
   const [stations, setStations] = useState([]);
 
@@ -53,6 +55,13 @@ export default function ATSController() {
         lastMonitorTs.current = Date.now();
         resendCount.current = 0;
         setMonitorData(data);
+      });
+
+      // 固件回报的界面状态：屏幕镜像与面板归属都以它为准
+      conn.onUiData((ui) => {
+        lastMonitorTs.current = Date.now();
+        resendCount.current = 0;
+        setFirmwareUi(ui);
       });
 
       conn.onRawData((data) => {
@@ -96,6 +105,7 @@ export default function ATSController() {
         if (!status) {
           setDeviceName('');
           setStations([]);
+          setFirmwareUi(null);
         } else {
           // 连接后先开监视器，再读一次存储电台（不依赖 connType，谁连上就开谁）
           setTimeout(() => {
@@ -139,6 +149,9 @@ export default function ATSController() {
     const timer = setInterval(() => {
       const conn = connType === 'ble' ? bleRef.current : serialRef.current;
       if (!conn || !conn.connected) return;
+      // 息屏休眠中一律不补发：固件收到任何字节都会 sleepOn(false)，
+      // 保活用的 't' 会立刻把收音机唤醒，休眠就永远停不住。
+      if (conn.sleeping) return;
       const now = Date.now();
       if (now - lastMonitorTs.current < 900) return;
       // 连发重试要有间隔，避免把固件的『开关』式监视器来回翻
@@ -146,7 +159,8 @@ export default function ATSController() {
       if (now - lastResendTs.current < gap) return;
       lastResendTs.current = now;
       resendCount.current += 1;
-      conn.toggleMonitor();
+      // ensureMonitor 对新固件发幂等的 'g'，不会像 't' 那样把状态流翻来翻去
+      conn.ensureMonitor();
     }, 250);
     return () => clearInterval(timer);
   }, [connected, connType]);
@@ -280,6 +294,7 @@ export default function ATSController() {
             connected={connected}
             connType={connType}
             monitor={monitorData}
+            firmwareUi={firmwareUi}
             stations={stations}
             onReadStations={handleReadStations}
             onSaveStation={handleSaveStation}

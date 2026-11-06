@@ -35,7 +35,15 @@ export const LAYOUT = {
   BATT_X: 288, BATT_Y: 0,
   WIFI_X: 237, WIFI_Y: 0,
   BLE_X: 104, BLE_Y: 0,
+  // Draw.h：S-Meter 布局（UI_SMETER）专用偏移
+  ALT_MENU_X: 0, ALT_MENU_Y: 0,
+  ALT_METER_X: 75, ALT_METER_Y: 136,
+  ALT_STEREO_X: 251, ALT_STEREO_Y: 24,
 };
+
+// 侧边栏原点：随布局切换（默认 MENU_Y=18 / S-Meter ALT_MENU_Y=0）
+let SB_X = LAYOUT.MENU_X;
+let SB_Y = LAYOUT.MENU_Y;
 
 // Themes.cpp theme[0] "Default"，RGB565 已转 RGB888
 export const THEME_DEFAULT = {
@@ -84,17 +92,20 @@ export const MODE_DESC = ['FM', 'LSB', 'USB', 'AM'];
 
 // Menu.cpp menu[]：按压编码器弹出的主菜单（14 项，顺序与固件一致）
 // 中文版：专业术语（VFO/AGC/ATTN/AVC）保留原文
+// Menu.cpp menu[]：主菜单（14 项），文字与固件数组原文逐字一致
 export const MENU_ITEMS = [
-  '模式', '波段', '音量', 'VFO A/B', '步进', '搜台', '扫描',
-  '存储', '静噪', '带宽', 'AGC/ATTN', 'AVC', '软静音', '设置',
+  '模式', '波段', '音量', 'VFO A/B', '步进', '搜台', '扫频',
+  '记忆', '静噪', '带宽', 'AGC/ATTN', 'AVC', '软静音', '设置',
 ];
 
-// Menu.cpp settings[]：设置子菜单（22 项）
+// Menu.cpp settings[]：设置子菜单（24 项），文字与固件数组原文逐字一致。
+// 注意第 5 项「定时待机」和第 10 项「编码器」是汉化版新增的，
+// 旧版 App 漏了这两项，导致光标与真机整体错位。
 export const SETTINGS_ITEMS = [
-  '亮度', '日期/时间', 'UTC 偏移', '睡眠定时', '睡眠模式', '关机定时',
-  '主题', '界面布局', '菜单缩放', '滚动方向', 'RDS', 'FM 立体声', 'FM 区域',
-  '校准', 'DSP 补丁', '加载 EiBi', '升级固件', 'USB 端口', 'TCP 端口',
-  '蓝牙', 'Wi-Fi', '关于',
+  '亮度', '日期时间', 'UTC 时区', '休眠定时', '休眠方式', '定时待机',
+  '关机定时', '主题', '界面布局', '放大菜单', '编码器', '滚动方向',
+  'RDS', 'FM 立体声', 'FM 地区', '校准', 'DSP 补丁', '载入 EiBi',
+  '固件升级', 'USB 串口', 'TCP 端口', '蓝牙', 'Wi-Fi', '关于',
 ];
 
 // 步进档位（steps[][] 的 desc，顺序由细到粗）
@@ -174,8 +185,9 @@ export function bandRange(name) {
 
 // ---------- 基础绘图 ----------
 
-const F_SMALL = '13px "DejaVu Sans Mono", "Menlo", "Consolas", monospace';
-const F_LARGE = '26px "DejaVu Sans Mono", "Menlo", "Consolas", monospace';
+// Common.h：FONT_SMALL = font_cn_16，FONT_LARGE = font_cn_24
+const F_SMALL = '16px "DejaVu Sans Mono", "Menlo", "Consolas", monospace';
+const F_LARGE = '24px "DejaVu Sans Mono", "Menlo", "Consolas", monospace';
 const F_BAND = '24px "Helvetica Neue", Arial, sans-serif';
 
 function px(v) { return Math.round(v) + 0.5; }
@@ -423,17 +435,24 @@ function drawStationName(ctx, th, name, x, y) {
 }
 
 // Menu.cpp drawInfo()：左侧信息框（菜单空闲时）
+// 5 行固定项 + 1 行轮播位（关机定时 / 待机定时 / 时钟，只有存在时才占位）
 function drawInfo(ctx, th, st, x, y) {
   roundRect(ctx, 1 + x, 1 + y, 86, 110, 4, th.box_border, th.box_bg);
 
   const rows = [
-    ['步进', st.stepDesc || '5k'],
-    ['BW', st.bwDesc || '3.0k'],
-    [st.agcOn ? 'AGC' : 'Att', st.agcOn ? '开' : String(st.agcNdx).padStart(2, '0')],
-    ['音量', st.muted ? '静音' : String(st.volume)],
-    ['AVC', st.avcDesc || '12dB'],
-    [st.timeLabel || '时间', st.timeText || '--:--'],
+    ['步进:', st.stepDesc || '5k'],
+    ['带宽:', st.bwDesc || '3.0k'],
+    st.agcOn
+      ? ['AGC:', '开']
+      : ['衰减:', String(st.agcNdx).padStart(2, '0')],
+    ['音量:', st.muted ? '静音' : String(st.volume)],
+    ['AVC:', st.mode === 0 ? 'n/a' : (st.avcDesc && st.avcDesc !== '--' ? st.avcDesc : '--')],
   ];
+
+  // 第 6 行：固件按「关机定时 → 待机定时 → 时钟」轮播，都没有就整行不画
+  if (st.offTimer > 0) rows.push(['关机:', String(st.offTimer)]);
+  else if (st.standbyTimer > 0) rows.push(['待机:', String(st.standbyTimer)]);
+  else if (st.timeText) rows.push([st.timeLabel || '时间:', st.timeText]);
 
   setFont(ctx, F_SMALL, th.box_text, 'left', 'middle');
   rows.forEach((row, i) => {
@@ -447,7 +466,7 @@ function drawInfo(ctx, th, st, x, y) {
 // 几何完全照固件：面板 (1+x,1+y,76+sx,110)，标题 center(40+x+sx/2, 12+y)，
 // 分隔线 y=23+y，高亮行 (6+x, 24+y+32, 66+sx, 16)，行文字 y = 64+y+i*16（i=-2..2）
 function drawMenuPanel(ctx, th, st, title, items, idx) {
-  const x = LAYOUT.MENU_X, y = LAYOUT.MENU_Y, sx = LAYOUT.MENU_DX;
+  const x = SB_X, y = SB_Y, sx = LAYOUT.MENU_DX;
   const cx = 40 + x + sx / 2; // 45
 
   roundRect(ctx, 1 + x, 1 + y, 76 + sx, 110, 4, th.menu_border, th.menu_bg);
@@ -464,6 +483,8 @@ function drawMenuPanel(ctx, th, st, title, items, idx) {
 
   const count = items.length;
   for (let i = -2; i <= 2; i++) {
+    // 固件：项数不足 5 时越界的行直接不画，否则短菜单会重复显示同一项
+    if (count < 5 && (idx + i < 0 || idx + i >= count)) continue;
     const item = items[((idx + i) % count + count) % count];
     const sel = i === 0;
     setFont(ctx, F_SMALL, sel ? th.menu_hl_text : th.menu_item, 'center', 'middle');
@@ -471,33 +492,52 @@ function drawMenuPanel(ctx, th, st, title, items, idx) {
   }
 }
 
-// 面板标题（Menu.cpp 各 drawXxx 的标题文字，中文）
+// 面板标题（Menu.cpp 各 drawXxx 的标题文字，中文，与固件一致）
 export const PANEL_TITLES = {
-  bw: '带宽', avc: 'AVC', squelch: '静噪', memory: '存储',
-  seek: '搜台', scan: '扫描', vfo: 'VFO A/B', softmute: '软静音',
-  brt: '亮度', datetime: '日期/时间', utcoffset: 'UTC 偏移',
-  sleep: '睡眠定时', sleepmode: '睡眠模式', offtimer: '关机定时',
-  theme: '主题', ui: '界面布局', zoom: '菜单缩放', scroll: '滚动方向',
-  rds: 'RDS', fm_stereo: 'FM 立体声', fm_region: 'FM 区域',
-  cal: '校准', dsp: 'DSP 补丁', eibi: '加载 EiBi', updatefw: '升级固件',
-  usbmode: 'USB 端口', tcpmode: 'TCP 端口', blemode: '蓝牙',
+  bw: '带宽', avc: 'AVC', squelch: '静噪', memory: '记忆',
+  seek: '搜台', scan: '扫频', vfo: 'VFO A/B', softmute: '软静音',
+  brt: '亮度', datetime: '日期时间', utcoffset: 'UTC 时区',
+  sleep: '休眠定时', sleepmode: '休眠方式', offtimer: '关机定时',
+  stbytimer: '定时待机', encoder: '编码器',
+  theme: '主题', ui: '界面布局', zoom: '放大菜单', scroll: '滚动方向',
+  rds: 'RDS', fm_stereo: 'FM 立体声', fm_region: 'FM 地区',
+  cal: '校准', dsp: 'DSP 补丁', eibi: '载入 EiBi', updatefw: '固件升级',
+  usbmode: 'USB 串口', tcpmode: 'TCP 端口', blemode: '蓝牙',
   wifimode: 'Wi-Fi', about: '关于',
 };
 
 // 面板框架（drawCommon）：标题 + 分隔线，无列表高亮
 function drawCommonPanel(ctx, th, title) {
-  const x = LAYOUT.MENU_X, y = LAYOUT.MENU_Y, sx = LAYOUT.MENU_DX;
+  const x = SB_X, y = SB_Y, sx = LAYOUT.MENU_DX;
   roundRect(ctx, 1 + x, 1 + y, 76 + sx, 110, 4, th.menu_border, th.menu_bg);
   setFont(ctx, F_SMALL, th.menu_hdr, 'center', 'middle');
   ctx.fillText(title, 40 + x + sx / 2, 12 + y);
   line(ctx, 1 + x, 23 + y, 76 + sx + x, 23 + y, th.menu_border);
 }
 
+// 固件 Menu.cpp 里的枚举文字（与真机逐字一致）
+export const LIST_PANELS = {
+  ui:        { title: '界面布局', items: ['默认', 'S-Meter'] },
+  sleepmode: { title: '休眠方式', items: ['锁定', '解锁', 'CPU 睡眠', 'BLE 待机'] },
+  fm_stereo: { title: 'FM 立体声', items: ['自动', '单声道'] },
+  usbmode:   { title: 'USB 串口', items: ['关', 'Ad hoc'] },
+  tcpmode:   { title: 'TCP 端口', items: ['关', 'Ad hoc'] },
+  blemode:   { title: '蓝牙', items: ['关', 'Ad hoc', 'HID', '清除配对'] },
+  wifimode:  { title: 'Wi-Fi', items: ['关', '仅 AP', 'AP+连接', '连接', '仅对时'] },
+};
+
 // Menu.cpp drawSideBar()：按当前命令切换左侧面板
 function drawSideBar(ctx, th, st) {
   const ui = st.ui || 'info';
   if (ui === 'info' || !ui) {
-    drawInfo(ctx, th, st, LAYOUT.MENU_X, LAYOUT.MENU_Y);
+    drawInfo(ctx, th, st, SB_X, SB_Y);
+    return;
+  }
+
+  // 列表面板：文字与高亮项都由固件回报（st.option）
+  const list = LIST_PANELS[ui];
+  if (list) {
+    drawMenuPanel(ctx, th, st, list.title, list.items, st.option || 0);
     return;
   }
 
@@ -531,8 +571,8 @@ function drawSideBar(ctx, th, st) {
     case 'volume': {
       // drawVolume()：标题 + 大号音量数字（FONT_DIGITS），静音时数字上画一道斜杠
       drawCommonPanel(ctx, th, '音量');
-      const cx = 40 + LAYOUT.MENU_X + LAYOUT.MENU_DX / 2;
-      const cy = 66 + LAYOUT.MENU_Y;
+      const cx = 40 + SB_X + LAYOUT.MENU_DX / 2;
+      const cy = 66 + SB_Y;
       setFont(ctx, '32px "DejaVu Sans Mono", "Menlo", monospace', th.menu_param, 'center', 'middle');
       ctx.fillText(String(st.volume ?? 0), cx, cy + 2);
       if (st.muted) {
@@ -547,13 +587,13 @@ function drawSideBar(ctx, th, st) {
     case 'agc': {
       // drawAgc()：AGC On 或两位衰减值
       drawCommonPanel(ctx, th, 'AGC/ATTN');
-      const cx = 40 + LAYOUT.MENU_X + LAYOUT.MENU_DX / 2;
+      const cx = 40 + SB_X + LAYOUT.MENU_DX / 2;
       setFont(ctx, F_SMALL, th.menu_param, 'center', 'middle');
       if (st.agcOn) {
-        ctx.fillText('AGC', cx, 48 + LAYOUT.MENU_Y);
-        ctx.fillText('开', cx, 72 + LAYOUT.MENU_Y);
+        ctx.fillText('AGC', cx, 48 + SB_Y);
+        ctx.fillText('开', cx, 72 + SB_Y);
       } else {
-        ctx.fillText(String(st.agcNdx).padStart(2, '0'), cx, 66 + LAYOUT.MENU_Y);
+        ctx.fillText(String(st.agcNdx).padStart(2, '0'), cx, 66 + SB_Y);
       }
       break;
     }
@@ -561,6 +601,36 @@ function drawSideBar(ctx, th, st) {
     default: {
       // 其余面板（Menu.cpp 各 drawXxx）：标题 + 当前值
       drawCommonPanel(ctx, th, PANEL_TITLES[ui] || '菜单');
+      const cx = 40 + SB_X + LAYOUT.MENU_DX / 2;
+
+      // 计时类：大字数值 + 小字单位，为 0 时显示「关」
+      // （drawOffTimer / drawStandbyTimer 显示「分」，drawSleep 显示「秒」）
+      const timerValue =
+        ui === 'offtimer' ? st.offTimer :
+        ui === 'stbytimer' ? st.standbyTimer :
+        ui === 'sleep' ? st.sleepTimer : undefined;
+
+      if (timerValue !== undefined) {
+        setFont(ctx, F_LARGE, th.menu_param, 'center', 'middle');
+        if (timerValue) {
+          ctx.fillText(String(timerValue), cx, 60 + SB_Y);
+          setFont(ctx, F_SMALL, th.menu_param, 'center', 'middle');
+          ctx.fillText(ui === 'sleep' ? '秒' : '分', cx, 88 + SB_Y);
+        } else {
+          ctx.fillText('关', cx, 60 + SB_Y);
+        }
+        break;
+      }
+
+      // 编码器档位（drawEncoder）：大字定位数 + 小字脉冲数
+      if (ui === 'encoder' && st.encoderHalfStep !== undefined) {
+        setFont(ctx, F_LARGE, th.menu_param, 'center', 'middle');
+        ctx.fillText(st.encoderHalfStep ? '30定位' : '20定位', cx, 58 + SB_Y);
+        setFont(ctx, F_SMALL, th.menu_item, 'center', 'middle');
+        ctx.fillText(st.encoderHalfStep ? '15脉冲' : '20脉冲', cx, 88 + SB_Y);
+        break;
+      }
+
       setFont(ctx, F_SMALL, th.menu_param, 'center', 'middle');
       const value =
         ui === 'bw' ? (st.bwDesc || '--') :
@@ -571,7 +641,7 @@ function drawSideBar(ctx, th, st) {
         ui === 'brt' ? String(st.backlight ?? '--') :
         ui === 'cal' ? String(st.calibration ?? '--') :
         '--';
-      ctx.fillText(String(value), 40 + LAYOUT.MENU_X + LAYOUT.MENU_DX / 2, 66 + LAYOUT.MENU_Y);
+      ctx.fillText(String(value), cx, 66 + SB_Y);
       break;
     }
   }
@@ -626,10 +696,140 @@ function drawScale(ctx, th, st) {
   }
 }
 
-// ---------- 主入口：等同 drawLayoutDefault() ----------
+// ---------- S-Meter 布局（Layout-SMeter.cpp / UI_SMETER） ----------
+
+// Layout-SMeter.cpp getInterpolatedStrength()：RSSI → S 表格数（AM/FM 各一套折线表）
+export function getInterpolatedStrength(rssi, mode) {
+  const amT = [1, 2, 3, 4, 10, 16, 22, 28, 34, 44, 54, 64, 74, 84, 94, 95, 96];
+  const amV = [1, 4, 7, 10, 13, 16, 19, 22, 25, 28, 31, 34, 37, 40, 43, 46, 49];
+  const fmT = [1, 2, 8, 14, 24, 34, 44, 54, 64, 74, 76, 77];
+  const fmV = [1, 19, 22, 25, 28, 31, 34, 37, 40, 43, 46, 49];
+
+  const isFM = mode === 0;
+  const thresholds = isFM ? fmT : amT;
+  const values = isFM ? fmV : amV;
+
+  for (let i = 0; i < thresholds.length; i++) {
+    if (rssi <= thresholds[i]) {
+      if (!i) return values[i];
+      const interval = thresholds[i] - thresholds[i - 1];
+      if (!interval) return values[i];
+      const pos = (rssi - thresholds[i - 1]) / interval;
+      return Math.round(values[i - 1] + pos * (values[i] - values[i - 1]));
+    }
+  }
+  return values[values.length - 1];
+}
+
+// drawSmallScale()：51..269 的点线，两端圆点，游标实心圆，左右标波段上下限
+function drawSmallScale(ctx, th, st, y) {
+  const range = bandRange(st.bandName);
+  const x0 = 51;
+  const x1 = 269;
+
+  for (let i = x0 + 3; i <= x1 - 3; i += 2) {
+    rect(ctx, i, y, 1, 1, th.scale_line);
+  }
+  setFont(ctx, F_SMALL, th.scale_text, 'center', 'middle');
+  ctx.strokeStyle = th.scale_line;
+  ctx.beginPath();
+  ctx.arc(x0, y, 3, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(x1, y, 3, 0, Math.PI * 2);
+  ctx.stroke();
+
+  const freq = Math.min(Math.max(st.freq, range.min), range.max);
+  const px0 = Math.round(x0 + ((x1 - x0) * (freq - range.min)) / (range.max - range.min || 1));
+  ctx.fillStyle = th.scale_pointer;
+  ctx.beginPath();
+  ctx.arc(px0, y, 3, 0, Math.PI * 2);
+  ctx.fill();
+
+  const fmt = (f) => (st.mode === 0 ? (f / 1e6).toFixed(2) : String(Math.round(f / 1000)));
+  setFont(ctx, F_SMALL, th.scale_text, 'center', 'middle');
+  ctx.fillText(fmt(range.min), x0 - 27, y);
+  ctx.fillText(fmt(range.max), x1 + 27, y);
+}
+
+// drawAltStereoIndicator()：两个相切圆环
+function drawAltStereoIndicator(ctx, th, x, y, stereo) {
+  if (!stereo) return;
+  ctx.strokeStyle = th.stereo_icon;
+  ctx.beginPath();
+  ctx.arc(x - 4, y, 7, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(x + 4, y, 7, 0, Math.PI * 2);
+  ctx.stroke();
+}
+
+// drawLargeSMeter()：49 格长条 + S 刻度图例 + 右侧 RSSI 大字
+function drawLargeSMeter(ctx, th, rssi, strength, x, y) {
+  // 刻度图例（只在奇数位标数字）与连接点线
+  setFont(ctx, F_SMALL, th.scale_text, 'center', 'top');
+  let lastX = x;
+  for (let i = 0; i < 16; i++) {
+    if (i % 2) {
+      const textX = x + i * 15 - 13;
+      let label = null;
+      if (i < 10) label = String(i);
+      else if (i === 11) label = '+20';
+      else if (i === 13) label = '+40';
+      else if (i === 15) label = '+60';
+      if (label) {
+        ctx.fillStyle = th.scale_text;
+        ctx.fillText(label, textX, 20 + y);
+        const w = ctx.measureText(label).width;
+        for (let p = lastX; p < textX - w / 2; p++) {
+          if (p & 1) rect(ctx, p, 28 + y, 1, 1, th.scale_line);
+        }
+        lastX = textX + w / 2;
+      }
+    }
+  }
+  for (let p = lastX; p <= x + 15 * 16 + 2; p++) {
+    if (p & 1) rect(ctx, p, 28 + y, 1, 1, th.scale_line);
+  }
+
+  // "S" 与 RSSI 数值
+  setFont(ctx, F_SMALL, th.scale_text, 'left', 'bottom');
+  ctx.fillText('S', x - 10, 36 + y);
+  setFont(ctx, F_LARGE, th.scale_text, 'right', 'bottom');
+  ctx.fillText(String(rssi), x - 15, 40 + y);
+
+  // 49 格条：前 28 格绿色，之后红色，未达部分深灰
+  for (let i = 0; i < 49; i++) {
+    let c = th.smeter_bar_empty;
+    if (i < 28 && i < strength) c = th.smeter_bar;
+    else if (i < strength) c = th.smeter_bar_plus;
+    rect(ctx, x + i * 5, 11 + y, 3, 10, c);
+  }
+}
+
+// drawLargeSNMeter()：49 格长条 + "N" 与 SNR 数值
+function drawLargeSNMeter(ctx, th, snr, x, y) {
+  setFont(ctx, F_SMALL, th.scale_text, 'left', 'bottom');
+  ctx.fillText('N', x - 10, 12 + y);
+  setFont(ctx, F_LARGE, th.scale_text, 'right', 'bottom');
+  ctx.fillText(String(snr), x - 15, 16 + y);
+
+  const bars = Math.floor((snr * 45) / 128);
+  for (let i = 0; i < 49; i++) {
+    rect(ctx, x + i * 5, y - 1, 3, 10, i < bars ? th.smeter_bar : th.smeter_bar_empty);
+  }
+}
+
+// ---------- 主入口：等同固件 drawScreen() ----------
+// uiLayout 0 = UI_DEFAULT（默认），1 = UI_SMETER（S-Meter 布局）
 
 export function renderScreen(ctx, st) {
   const th = st.theme || THEME_DEFAULT;
+  const alt = (st.uiLayout ?? 0) === 1;
+
+  // Draw.h：两种布局的侧边栏原点不同，整块面板跟着平移
+  SB_X = alt ? LAYOUT.ALT_MENU_X : LAYOUT.MENU_X;
+  SB_Y = alt ? LAYOUT.ALT_MENU_Y : LAYOUT.MENU_Y;
 
   ctx.save();
   ctx.clearRect(0, 0, SW, SH);
@@ -656,14 +856,30 @@ export function renderScreen(ctx, st) {
 
   if (st.stationName) drawStationName(ctx, th, st.stationName, LAYOUT.RDS_X, LAYOUT.RDS_Y);
 
-  drawSideBar(ctx, th, st);
+  if (alt) {
+    // —— S-Meter 布局（Layout-SMeter.cpp）——
+    drawSmallScale(ctx, th, st, 120);
+    drawSideBar(ctx, th, st);
+    drawAltStereoIndicator(ctx, th, LAYOUT.ALT_STEREO_X, LAYOUT.ALT_STEREO_Y, !!st.stereo);
 
-  drawSMeter(ctx, th, getStrength(st.rssi ?? 0, st.mode ?? 3), LAYOUT.METER_X, LAYOUT.METER_Y);
+    // 扫描时固件画频谱图，音频状态下才画双表；状态条优先级更高
+    if (st.ui !== 'scan') {
+      const rssi = st.rssi ?? 0;
+      const snr = st.snr ?? 0;
+      drawLargeSNMeter(ctx, th, snr, LAYOUT.ALT_METER_X, LAYOUT.ALT_METER_Y);
+      drawLargeSMeter(ctx, th, rssi, getInterpolatedStrength(rssi, st.mode ?? 3), LAYOUT.ALT_METER_X, LAYOUT.ALT_METER_Y);
+    }
+  } else {
+    // —— 默认布局（Layout-Default.cpp）——
+    drawSideBar(ctx, th, st);
 
-  // 立体声：把 S 表从中间切开
-  if (st.stereo) rect(ctx, 15, 7, 66, 2, th.bg);
+    drawSMeter(ctx, th, getStrength(st.rssi ?? 0, st.mode ?? 3), LAYOUT.METER_X, LAYOUT.METER_Y);
 
-  drawScale(ctx, th, st);
+    // 立体声：把 S 表从中间切开
+    if (st.stereo) rect(ctx, 15, 7, 66, 2, th.bg);
+
+    drawScale(ctx, th, st);
+  }
 
   ctx.restore();
 }
@@ -692,8 +908,9 @@ export const DEFAULT_STATE = {
   stationName: '',
   vfoIdx: 0,
   ui: 'info',      // info 信息框 / menu 主菜单 / volume 音量条 / mode / band / step / bw / agc / settings …
+  uiLayout: 0,     // 0 默认布局 / 1 S-Meter 布局（固件 uiLayoutIdx）
   menuIdx: 0,
   settingsIdx: 0,
-  timeLabel: 'Time:',
-  timeText: '20:15',
+  timeLabel: '时间:',
+  timeText: undefined, // 固件对时后才回报，没有就整行不画
 };

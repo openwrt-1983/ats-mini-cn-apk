@@ -23,6 +23,14 @@
  * - !: Set theme (hex color list)
  */
 
+import { parseStatusLine } from './statusParser';
+
+/**
+ * 休眠期间允许发出的命令白名单（与 BleConnection 保持一致）。
+ * 固件在休眠中收到任何其它字节都会立刻唤醒，后台命令漏出去待机就停不住。
+ */
+const SLEEP_ALLOWED = new Set(['o', 'O', 'Z', 'y']);
+
 // Dynamic import for Capacitor (only available after installation)
 let Capacitor, Serial;
 try {
@@ -43,7 +51,10 @@ export class SerialConnection {
     this.connected = false;
     this.sleeping = false;
     this.logOn = false;
+    // 状态流里带界面字段 = 汉化固件新版，支持幂等 'g' 心跳命令
+    this.hasExtendedStatus = false;
     this.monitorCallback = null;
+    this.uiCallback = null;
     this.errorCallback = null;
     this.connectionCallback = null;
     this.rawDataCallback = null;
@@ -287,81 +298,20 @@ export class SerialConnection {
       this.rawDataCallback(data);
     }
 
-    // Log all received data to console for debugging
-    console.log('[ATS Mini RX]:', data);
+    // 与 BLE 共用同一套解析（statusParser），两边字段顺序不会再各自跑偏
+    const parsed = parseStatusLine(data);
+    if (!parsed) return;
 
-    // Check if it's monitor mode data (comma-separated values)
-    if (data.includes(',')) {
-      const values = data.split(',');
-      console.log('[ATS Mini] Parsed values:', values.length, 'values:', values);
+    if (parsed.ui) {
+      this.hasExtendedStatus = true;
+      this.sleeping = parsed.ui.sleep;
+    }
 
-      if (values.length >= 15) {
-        // Parse monitor data - FORMATO OFICIAL según documentación:
-        // 0: APP_VERSION (F/W version) - Ej: 201 = v2.01
-        // 1: currentFrequency - FM = 10 kHz, AM/SSB = 1 kHz
-        // 2: currentBFO - SSB = Hz
-        // 3: bandCal - BFO calibration
-        // 4: bandName - Band (VHF, 41M, etc.)
-        // 5: currentMode - Mode (FM/LSB/USB/AM)
-        // 6: currentStepIdx - Step
-        // 7: bandwidthIdx - Bandwidth
-        // 8: agcIdx - AGC/Attn
-        // 9: volume - Volume (0-63, 0=Mute)
-        // 10: remoteRssi - RSSI (0-127 dBuV)
-        // 11: remoteSnr - SNR (0-127 dB)
-        // 12: tuningCapacitor - Antenna Capacitor (0-6143)
-        // 13: remoteVoltage - ADC value (Voltage = Value x 1.702 / 1000)
-        // 14: remoteSeqnum - Sequence number (0-255)
-
-        // Parse firmware version
-        const appVersion = parseInt(values[0]);
-        const firmwareVersion = appVersion > 200 ? `v${Math.floor(appVersion/100)}.${appVersion%100}` : 'v2.x';
-
-        // Parse frequency
-        // FM mode: value in 10 kHz units (9520 = 95.20 MHz)
-        // AM/SSB mode: value in 1 kHz units (7529 = 7.529 MHz)
-        const freqValue = parseFloat(values[1]);
-        let frequencyHz;
-        if (values[5] === 'FM') {
-          // FM: multiply by 10000 (10 kHz units to Hz)
-          frequencyHz = freqValue * 10000;
-        } else {
-          // AM/SSB: multiply by 1000 (1 kHz units to Hz)
-          frequencyHz = freqValue * 1000;
-        }
-
-        // Parse voltage (ADC value)
-        const adcValue = parseFloat(values[13]);
-        const voltage = adcValue * 1.702 / 1000;
-
-        const monitorData = {
-          firmware: firmwareVersion,
-          frequency: frequencyHz,
-          band: values[4],
-          mode: values[5],
-          rssi: parseInt(values[10]), // RSSI (0-127 dBuV)
-          snr: parseInt(values[11]) || 0, // SNR (0-127 dB)
-          voltage: voltage,
-          step: values[6],
-          bandwidth: values[7],
-          agc: values[8], // AGC/Attenuator index
-          volume: parseInt(values[9]),
-          backlight: 5, // Not available in monitor data
-          calibration: parseInt(values[3]) || 0, // BFO calibration
-          sleep: false, // Not available in monitor data
-          memory: values[14], // Sequence number
-          bfo: parseInt(values[2]) || 0, // BFO for SSB
-          tuningCapacitor: parseInt(values[12]) || 0 // Antenna tuning
-        };
-
-        console.log('[ATS Mini] Monitor data parsed:', monitorData);
-
-        if (this.monitorCallback) {
-          this.monitorCallback(monitorData);
-        }
-      } else {
-        console.warn('[ATS Mini] Insufficient data fields:', values.length, 'expected 15');
-      }
+    if (this.monitorCallback) {
+      this.monitorCallback(parsed.monitor);
+    }
+    if (parsed.ui && this.uiCallback) {
+      this.uiCallback(parsed.ui);
     }
   }
 
@@ -372,6 +322,10 @@ export class SerialConnection {
   async sendCommand(command) {
     if (!this.connected) {
       throw new Error('Not connected to device');
+    }
+    if (this.sleeping && !SLEEP_ALLOWED.has(String(command))) {
+      console.log('[ATS Mini] 待机中丢弃:', command);
+      return;
     }
 
     try {
@@ -432,18 +386,32 @@ export class SerialConnection {
   // 休眠：'O' 只熄屏（默认 SLEEP_LOCKED 模式下按编码器唤不醒），'o' 才真正亮屏
   async sleepOn() { this.sleeping = true; await this.sendCommand('O'); }
   async sleepOff() { this.sleeping = false; await this.sendCommand('o'); }
+  // 强制蓝牙待机（'Z'），不理会设置里的休眠方式。旧固件不认这个命令，
+  // 调用方需在超时后降级到 sleepOn()。
+  async bleStandby() { this.sleeping = true; await this.sendCommand('Z'); }
+  // 唤醒并把休眠方式切成 CPU 睡眠（'y'）。旧固件不认，调用方超时后降级 sleepOff()。
+  async wakeLight() { this.sleeping = false; await this.sendCommand('y'); }
   async toggleSleep() {
     if (this.sleeping) await this.sleepOff();
     else await this.sleepOn();
   }
 
   // 监视器日志是『开关』语义：发一次 t 翻转一次，这里记下当前状态避免误关
+  // 't' 翻转、'g' 幂等开启。新固件用 'g'，看门狗重发不会关掉状态流。
   async toggleMonitor() {
+    if (this.hasExtendedStatus) {
+      await this.sendCommand('g');
+      return;
+    }
     this.logOn = !this.logOn;
     await this.sendCommand('t');
   }
 
   async ensureMonitor() {
+    if (this.hasExtendedStatus) {
+      await this.sendCommand('g');
+      return;
+    }
     if (!this.logOn) await this.toggleMonitor();
   }
 
@@ -489,6 +457,11 @@ export class SerialConnection {
 
   onMonitorData(callback) {
     this.monitorCallback = callback;
+  }
+
+  /** 固件回报的界面状态（currentCmd / 光标 / 休眠等），旧固件不会触发 */
+  onUiData(callback) {
+    this.uiCallback = callback;
   }
 
   onRawData(callback) {

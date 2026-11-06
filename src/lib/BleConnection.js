@@ -13,6 +13,7 @@
  */
 
 import { BleClient } from '@capacitor-community/bluetooth-le';
+import { parseStatusLine } from './statusParser';
 
 const NUS_SERVICE = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
 const NUS_RX = '6e400002-b5a3-f393-e0a9-e50e24dcca9e'; // write
@@ -53,6 +54,16 @@ function isUserCancelled(err) {
   return /cancel|取消|rejected|dismiss/i.test(msg);
 }
 
+/**
+ * 休眠期间允许发出的命令白名单。
+ *
+ * 固件 BleMode.cpp 的规则：休眠中只要收到『不是 t / g / CR / LF』的字节，
+ * 就会 sleepOn(false) 立刻唤醒。所以看门狗、探针、跳台这些后台命令一旦漏出来，
+ * 待机会被瞬间打断 —— 表现为「点了待机，收音机没反应/马上又亮」。
+ * 这里在连接层做硬拦截，只放行待机与唤醒本身。
+ */
+const SLEEP_ALLOWED = new Set(['o', 'O', 'Z', 'y']);
+
 /** 把命令字符串转成 DataView（插件的 write 只接受带 .buffer 的二进制数据） */
 function stringToDataView(str) {
   const bytes = new TextEncoder().encode(str);
@@ -79,9 +90,12 @@ export class BleConnection {
     this.connected = false;
     this.sleeping = false;
     this.logOn = false;
+    // 状态流里带界面字段 = 汉化固件新版，支持幂等 'g' 心跳命令
+    this.hasExtendedStatus = false;
     this.buffer = '';
     this.notifyListener = null;
     this.monitorCallback = null;
+    this.uiCallback = null;
     this.errorCallback = null;
     this.connectionCallback = null;
     this.rawDataCallback = null;
@@ -94,6 +108,8 @@ export class BleConnection {
   }
 
   onMonitorData(cb) { this.monitorCallback = cb; }
+  /** 固件回报的界面状态（currentCmd / 光标 / 休眠等），旧固件不会触发 */
+  onUiData(cb) { this.uiCallback = cb; }
   onRawData(cb) { this.rawDataCallback = cb; }
   onError(cb) { this.errorCallback = cb; }
   onConnectionChange(cb) { this.connectionCallback = cb; }
@@ -252,53 +268,28 @@ export class BleConnection {
 
   processReceivedData(data) {
     if (this.rawDataCallback) this.rawDataCallback(data);
-    console.log('[ATS Mini BLE RX]:', data);
 
-    if (!data.includes(',')) return;
-    const values = data.split(',');
-    if (values.length < 15) {
-      console.warn('[ATS Mini BLE] 数据字段不足:', values.length, '期望 15');
-      return;
+    const parsed = parseStatusLine(data);
+    if (!parsed) return;
+
+    // 固件回报的休眠状态是权威值，用来纠正本地猜测
+    if (parsed.ui) {
+      this.hasExtendedStatus = true;
+      this.sleeping = parsed.ui.sleep;
     }
 
-    // 监视器数据格式（与串口一致）:
-    // 0:固件版本 1:频率 2:BFO 3:校准 4:波段 5:模式 6:步进 7:带宽
-    // 8:AGC 9:音量 10:RSSI 11:SNR 12:天线电容 13:ADC电压 14:序号
-    const appVersion = parseInt(values[0]);
-    const firmwareVersion = appVersion > 200 ? `v${Math.floor(appVersion / 100)}.${appVersion % 100}` : 'v2.x';
-
-    const freqValue = parseFloat(values[1]);
-    const frequencyHz = values[5] === 'FM' ? freqValue * 10000 : freqValue * 1000;
-
-    const adcValue = parseFloat(values[13]);
-    const voltage = (adcValue * 1.702) / 1000;
-
-    const monitorData = {
-      firmware: firmwareVersion,
-      frequency: frequencyHz,
-      band: values[4],
-      mode: values[5],
-      rssi: parseInt(values[10]),
-      snr: parseInt(values[11]) || 0,
-      voltage: voltage,
-      step: values[6],
-      bandwidth: values[7],
-      agc: values[8],
-      volume: parseInt(values[9]),
-      backlight: 5,
-      calibration: parseInt(values[3]) || 0,
-      sleep: false,
-      memory: values[14],
-      bfo: parseInt(values[2]) || 0,
-      tuningCapacitor: parseInt(values[12]) || 0,
-    };
-
-    if (this.monitorCallback) this.monitorCallback(monitorData);
+    if (this.monitorCallback) this.monitorCallback(parsed.monitor);
+    if (parsed.ui && this.uiCallback) this.uiCallback(parsed.ui);
   }
 
   async sendCommand(command) {
     if (!this.connected || !this.deviceId) {
       throw new Error('蓝牙未连接');
+    }
+    // 待机中只放行待机/唤醒命令，其余一律不发（固件收到任何字节都会醒）
+    if (this.sleeping && !SLEEP_ALLOWED.has(String(command))) {
+      console.log('[ATS Mini BLE] 待机中丢弃:', command);
+      return;
     }
     try {
       console.log('[ATS Mini BLE TX]:', command);
@@ -340,16 +331,29 @@ export class BleConnection {
   // 休眠：'O' 只熄屏（默认 SLEEP_LOCKED 模式下按编码器唤不醒），'o' 才真正亮屏
   sleepOn() { this.sleeping = true; return this.sendCommand('O'); }
   sleepOff() { this.sleeping = false; return this.sendCommand('o'); }
+  // 强制蓝牙待机（'Z'）：绕过设置里的休眠方式，屏幕/音频/收音全关，只留 BLE
+  // 活着，App 才能再把它唤醒。'O' 走的是用户配置的那一档，设成 CPU 睡眠时
+  // 蓝牙会一起断，之后就连不上了 —— 这是「蓝牙休眠不对」的根因。
+  bleStandby() { this.sleeping = true; return this.sendCommand('Z'); }
+  // 唤醒并把『休眠方式』切成 CPU 睡眠（'y'）：屏幕亮、收音机继续放、BLE 在线。
+  // 之后真机长按编码器也只是熄屏，不会再进 BLE 待机断电。旧固件不认 'y'，
+  // 调用方负责超时后降级到 sleepOff()（'o'）。
+  wakeLight() { this.sleeping = false; return this.sendCommand('y'); }
   toggleSleep() {
     return this.sleeping ? this.sleepOff() : this.sleepOn();
   }
   // 监视器日志是『开关』语义：发一次 t 翻转一次，记下状态避免误关
+  // 监视器日志：'t' 是翻转语义，'g' 是幂等开启。
+  // 新固件（状态流带界面字段）认 'g'，看门狗反复重发也不会把状态流关掉；
+  // 旧固件不认 'g'，只能继续用 't' 并靠本地 logOn 记账。
   toggleMonitor() {
+    if (this.hasExtendedStatus) return this.sendCommand('g');
     this.logOn = !this.logOn;
     return this.sendCommand('t');
   }
 
   ensureMonitor() {
+    if (this.hasExtendedStatus) return this.sendCommand('g');
     return this.logOn ? Promise.resolve() : this.toggleMonitor();
   }
 

@@ -1,0 +1,10 @@
+[
+	{
+		"pkg": "@adeunis/capacitor-serial",
+		"classpath": "com.adeunis.capacitor.serial.SerialPlugin"
+	},
+	{
+		"pkg": "@capacitor-community/bluetooth-le",
+		"classpath": "com.capacitorjs.community.plugins.bluetoothle.BluetoothLe"
+	}
+]

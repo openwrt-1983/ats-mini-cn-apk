@@ -11,9 +11,12 @@ out/
 *.ap_
 *.dex
 
-# Capacitor 生成物（由 npx cap copy 重新生成，不入库）
+# Capacitor 生成物：public/ 由 CI 从 dist 复制，不入库。
+# 但 android/app/src/main/assets/capacitor.config.json 与 capacitor.plugins.json
+# 必须入库 —— CI 刻意不跑 npx cap sync（会覆盖 capacitor.settings.gradle 导致白屏），
+# 这两个文件是运行时配置与插件注册表的唯一来源，缺了 App 起不来、蓝牙和串口
+# 全部报 "not implemented"。
 android/app/src/main/assets/public/
-android/app/src/main/assets/capacitor.config.json
 
 # Android 构建与本地配置
 android/.gradle/

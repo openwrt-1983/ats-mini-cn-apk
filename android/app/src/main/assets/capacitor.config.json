@@ -1,0 +1,21 @@
+{
+	"appId": "com.ea5iyr.atsmini",
+	"appName": "ATS Mini 遥控台",
+	"webDir": "dist",
+	"server": {
+		"cleartext": true
+	},
+	"android": {
+		"webContentsDebuggingEnabled": true
+	},
+	"plugins": {
+		"BluetoothLe": {
+			"displayStrings": {
+				"scanning": "正在扫描 ATS Mini 收音机...",
+				"cancel": "取消",
+				"availableDevices": "可用设备",
+				"noDeviceFound": "未找到设备，请确认收音机已开启蓝牙模式"
+			}
+		}
+	}
+}

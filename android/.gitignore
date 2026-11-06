@@ -90,12 +90,20 @@ lint/tmp/
 *.hprof
 
 # Cordova plugins for Capacitor
+# settings.gradle 里 include 了 :capacitor-cordova-android-plugins，而这个模块
+# 只有 npx cap sync 才会生成。CI 刻意不跑 cap sync（会覆盖 capacitor.settings.gradle
+# 导致启动白屏），所以目录必须入库，只有里面的 build/ 产物继续忽略。
 capacitor-cordova-android-plugins
+!capacitor-cordova-android-plugins/
+capacitor-cordova-android-plugins/build/
 
 # Copied web assets
 app/src/main/assets/public
 
 # Generated Config files
-app/src/main/assets/capacitor.config.json
-app/src/main/assets/capacitor.plugins.json
+# 这两个必须入库：它们是 App 运行时配置与插件注册表的唯一来源，cap sync 才会生成，
+# 而 CI 不跑 sync。缺 capacitor.config.json 启动白屏，缺 plugins.json 蓝牙和串口
+# 全部报 "not implemented"。
+!app/src/main/assets/capacitor.config.json
+!app/src/main/assets/capacitor.plugins.json
 app/src/main/res/xml/config.xml

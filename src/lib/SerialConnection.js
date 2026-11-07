@@ -24,6 +24,7 @@
  */
 
 import { parseStatusLine } from './statusParser';
+import { clampName } from './nameLimit';
 
 /**
  * 休眠期间允许发出的命令白名单（与 BleConnection 保持一致）。
@@ -254,7 +255,7 @@ export class SerialConnection {
   async startReadingWeb() {
     try {
       this.reader = this.port.readable.getReader();
-      const decoder = new TextDecoder();
+      const decoder = new TextDecoder('utf-8');
 
       while (this.connected) {
         const { value, done } = await this.reader.read();
@@ -262,8 +263,9 @@ export class SerialConnection {
           break;
         }
 
-        // Decode the received data
-        const text = decoder.decode(value);
+        // stream:true 让解码器自己处理「一个汉字被拆到两次 read」的情况，
+        // 否则中文台名会显示成 U+FFFD（方块/问号）
+        const text = decoder.decode(value, { stream: true });
         this.buffer += text;
 
         // Process complete lines
@@ -425,9 +427,10 @@ export class SerialConnection {
 
   async setMemorySlot(slot, band, frequency, mode, name) {
     // Format: #01,VHF,107900000,FM[,名称]（# 命令同样必须以换行符结尾）
-    // 名称参数：省略 = 保留原名；传入空串 = 清除名称；固件限制 9 字符以内
+    // 名称参数：省略 = 保留原名；传入空串 = 清除名称；按固件 24 字节上限截断
     const slotStr = String(slot).padStart(2, '0');
-    const namePart = name === undefined || name === null ? '' : `,${String(name).slice(0, 9)}`;
+    const nameText = name === undefined || name === null ? '' : clampName(name);
+    const namePart = name === undefined || name === null ? '' : `,${nameText}`;
     const command = `#${slotStr},${band},${frequency},${mode}${namePart}\n`;
     console.log('[ATS Mini] Setting memory slot:', { slot: slotStr, band, frequency, mode, name });
     await this.sendCommand(command);

@@ -7,6 +7,7 @@ import {
   STEPS_BY_MODE, BW_BY_MODE, MODE_NAMES,
 } from '../lib/radioModel';
 import { StationTuner, formatFreq } from '../lib/stationTuner';
+import { clampName } from '../lib/nameLimit';
 
 /**
  * 遥控台（单页）：上方 1:1 复刻真机屏幕，下方编码器、功能键、存储电台。
@@ -65,6 +66,7 @@ const MON_FIELD = {
 export default function RemoteScreen({
   serial, connected, monitor, firmwareUi,
   stations = [], onReadStations, onSaveStation, onDeleteStation,
+  resetRef,
 }) {
   const canvasRef = useRef(null);
   const drawRef = useRef(null);
@@ -110,8 +112,7 @@ export default function RemoteScreen({
   // 旧固件不认识 'y' 时，用它把唤醒退回 'o'
   const wakeFallbackRef = useRef(null);
 
-  const [lastRx, setLastRx] = useState(0);
-  useEffect(() => { if (monitor) setLastRx(Date.now()); }, [monitor]);
+  // 「● 同步 / ○ 无数据」状态灯已经移到顶部连接条，由父组件按 lastMonitorTs 计算
 
   // ---------- 存储电台 ----------
   const [selIdx, setSelIdx] = useState(0);
@@ -206,7 +207,7 @@ export default function RemoteScreen({
       stereo: fu ? !!fu.stereo : false,
       menuIdx: fu ? fu.menuIdx : model.menuIdx,
       settingsIdx: fu ? fu.settingsIdx : model.settingsIdx,
-      stationName: '',
+      stationName: fu ? (fu.stationName || '') : '',
       // 第 6 行是固件的轮播位：没有定时器、没有对时就不显示。
       // 不能拿手机时间顶上，否则真机空着 App 却多一行。
       timeLabel: '时间:',
@@ -435,11 +436,10 @@ export default function RemoteScreen({
   // 以前靠「按住多久」推断，手指一滑就会多判一次，导致点一下变两下、面板跳级。
   // 唤醒：屏幕亮起来 + 把『休眠方式』切回 CPU 睡眠（SLEEP_LIGHT）。
   //
-  // 为什么唤醒也要动休眠方式：'Z' 会把休眠方式持久化成「BLE 待机」。如果醒来后
-  // 不改回去，收音机就一直停在 BLE 待机档 —— 之后真机长按编码器会再断电静音，
-  // 用户在收音机上长按一下以为只是熄屏，结果收音机哑了。所以每次醒来都发 'y'：
-  // 固件先 sleepOn(false) 正确唤醒（按当前档恢复功放/收音/SI4732），再把休眠
-  // 方式存成 CPU 睡眠。CPU 睡眠 = 只熄屏，收音机继续放，这正是真机长按的常规行为。
+  // 为什么唤醒也要动休眠方式：'Z' 在旧固件里会把休眠方式持久化成「BLE 待机」，新固件
+  // 已改成一次性（standbyForced），但旧固件仍在用。所以每次醒来都发 'y'：固件先
+  // sleepOn(false) 正确唤醒（按当前档恢复功放/收音/SI4732），再把休眠方式存成 CPU 睡眠。
+  // CPU 睡眠 = 只熄屏，收音机继续放，这正是真机长按的常规行为。
   const wakeUp = () => {
     clearTimeout(standbyFallbackRef.current);
     standbyFallbackRef.current = null;
@@ -473,8 +473,9 @@ export default function RemoteScreen({
   // 这一档平时要靠「设置 → 休眠方式 → BLE 待机」再熄屏才能进；出厂默认是
   // SLEEP_LOCKED，直接发 'O' 只会黑屏、收音机照响 —— 这正是之前点待机「不对」的原因。
   //
-  // 所以进待机发 'Z'：固件收到后先把休眠方式存成 BLE 待机，再走 standbyEnter()，
-  // 一步到位且以后真机长按也是这个效果。唤醒发 'o'（SleepOff）。
+  // 所以进待机发 'Z'：固件 standbyEnter() 抬起 standbyForced，强制走一遍
+  // bleStandbyEnter()，不管设置里是哪一档都能真正断电静音；只作用当次，不改设置。
+  // 唤醒走 wakeUp()（'y'）。
   const toggleSleep = () => {
     if (!connected) return;
     const model = modelRef.current;
@@ -620,6 +621,11 @@ export default function RemoteScreen({
     draw();
   };
 
+  // 顶部连接条上的「同步」按钮要能点这里，所以把函数交给父组件
+  useEffect(() => {
+    if (resetRef) resetRef.current = resetPanel;
+  });
+
   const B = ({ label, cmd, onClick, tone }) => (
     <button
       onClick={() => connected && onClick()}
@@ -636,8 +642,6 @@ export default function RemoteScreen({
       <span className="text-[8px] text-icom-text-dim">{cmd}</span>
     </button>
   );
-
-  const dataFresh = connected && Date.now() - lastRx < 1200;
 
   // 收音机跑的固件是否配套（会回报 15 项之后那批界面字段）。
   // 不配套时：面板内容、光标位置、休眠状态全都只能由 App 猜，屏幕必然和真机不同步。
@@ -659,19 +663,6 @@ export default function RemoteScreen({
               className="block w-full h-full object-contain"
             />
           </div>
-          <button
-            onClick={resetPanel}
-            className={`absolute top-1 right-1 px-1.5 py-0.5 rounded text-[9px] font-digital ${
-              dataFresh
-                ? 'bg-icom-green/20 text-icom-green'
-                : connected
-                  ? 'bg-icom-amber/20 text-icom-amber'
-                  : 'bg-white/10 text-white/40'
-            }`}
-            title="点一下把面板复位到信息框"
-          >
-            {dataFresh ? (paired ? '● 同步' : '● 实时') : connected ? '○ 无数据' : '未连接'}
-          </button>
           {asleep && (
             <button
               onClick={toggleSleep}
@@ -690,7 +681,7 @@ export default function RemoteScreen({
         {/* ===== 固件配套检查：不配套就把话说明白，别让用户以为屏幕不同步是 App 的问题 ===== */}
         {connected && !paired && (
           <div className="rounded border border-red-500/40 bg-red-500/10 px-2 py-1.5 text-[10px] leading-relaxed text-red-300">
-            收音机固件未配套（收到 {fieldCount}/29 项状态）。面板文字和光标只能由 App 推算，
+            收音机固件未配套（收到 {fieldCount} 项状态，配套固件应 ≥ 26 项）。面板文字和光标只能由 App 推算，
             所以菜单、设置、模式这些一定会和真机对不上；「BLE 待机」也只是熄屏，不会静音断电。
             <div className="mt-0.5 text-red-200/80">
               把 <span className="font-digital">ats-mini.ino.merged.bin</span> 刷到 0x0 地址，重连后这里会自动消失。
@@ -873,8 +864,8 @@ export default function RemoteScreen({
             </button>
             <input
               value={name}
-              onChange={(e) => setName(e.target.value.slice(0, 9))}
-              maxLength={9}
+              onChange={(e) => setName(clampName(e.target.value))}
+              maxLength={24}
               placeholder="名称(可空)"
               className="flex-1 min-w-0 bg-icom-display text-icom-text text-[11px] px-2 py-1 rounded
                 border border-icom-accent/30 focus:border-icom-accent focus:outline-none"

@@ -14,6 +14,7 @@
 
 import { BleClient } from '@capacitor-community/bluetooth-le';
 import { parseStatusLine } from './statusParser';
+import { clampName } from './nameLimit';
 
 const NUS_SERVICE = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
 const NUS_RX = '6e400002-b5a3-f393-e0a9-e50e24dcca9e'; // write
@@ -72,14 +73,13 @@ function stringToDataView(str) {
   return new DataView(buf);
 }
 
-function decodeView(value) {
+function decodeView(value, decoder = new TextDecoder('utf-8')) {
   if (typeof value === 'string') return value;
-  if (value instanceof DataView) {
-    return new TextDecoder().decode(value);
-  }
-  if (value instanceof ArrayBuffer) {
-    return new TextDecoder().decode(new DataView(value));
-  }
+  // 必须用 stream:true —— BLE 一包默认只有 20 字节，一个汉字 3 字节很容易被
+  // 拆到相邻两个通知里。逐包独立解码会把半个字符解成 U+FFFD（界面上的方块/问号），
+  // 表现为「山东文艺」显示成「山◻◻◻文艺」。stream 模式会把残缺字节留到下一包拼上。
+  if (value instanceof ArrayBuffer) return decoder.decode(new Uint8Array(value), { stream: true });
+  if (ArrayBuffer.isView(value)) return decoder.decode(value, { stream: true });
   return '';
 }
 
@@ -93,6 +93,8 @@ export class BleConnection {
     // 状态流里带界面字段 = 汉化固件新版，支持幂等 'g' 心跳命令
     this.hasExtendedStatus = false;
     this.buffer = '';
+    // 跨通知保留半个 UTF-8 字符的状态，必须跟着连接走
+    this.decoder = new TextDecoder('utf-8');
     this.notifyListener = null;
     this.monitorCallback = null;
     this.uiCallback = null;
@@ -135,8 +137,10 @@ export class BleConnection {
     });
 
     // 订阅固件 TX 通知（监视器数据流）
+    this.buffer = '';
+    this.decoder = new TextDecoder('utf-8');   // 新连接：丢掉上一次残留的半个字符
     this.notifyListener = (value) => {
-      const text = decodeView(value);
+      const text = decodeView(value, this.decoder);
       this.buffer += text;
 
       const lines = this.buffer.split('\n');
@@ -369,9 +373,10 @@ export class BleConnection {
   setFrequency(freqHz) { return this.sendCommand(`F${Math.round(freqHz)}\n`); }
 
   async setMemorySlot(slot, band, frequency, mode, name) {
-    // 名称参数：省略 = 保留原名；空串 = 清除名称；固件限制 9 字符以内
+    // 名称参数：省略 = 保留原名；空串 = 清除名称；支持中文，按固件 24 字节上限截断
     const slotStr = String(slot).padStart(2, '0');
-    const namePart = name === undefined || name === null ? '' : `,${String(name).slice(0, 9)}`;
+    const nameText = name === undefined || name === null ? '' : clampName(name);
+    const namePart = name === undefined || name === null ? '' : `,${nameText}`;
     await this.sendCommand(`#${slotStr},${band},${frequency},${mode}${namePart}\n`);
   }
 

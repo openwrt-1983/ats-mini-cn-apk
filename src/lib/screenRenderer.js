@@ -186,9 +186,12 @@ export function bandRange(name) {
 // ---------- 基础绘图 ----------
 
 // Common.h：FONT_SMALL = font_cn_16，FONT_LARGE = font_cn_24
-const F_SMALL = '16px "DejaVu Sans Mono", "Menlo", "Consolas", monospace';
-const F_LARGE = '24px "DejaVu Sans Mono", "Menlo", "Consolas", monospace';
-const F_BAND = '24px "Helvetica Neue", Arial, sans-serif';
+// 等宽西文 + 中文回退：台名、记忆名现在可以是中文，DejaVu/Consolas 都没有汉字，
+// 必须显式列出 Android/iOS 自带的中文字体，否则会画成方框。
+const CJK = '"Noto Sans SC", "Noto Sans CJK SC", "Source Han Sans SC", "PingFang SC", "Droid Sans Fallback"';
+const F_SMALL = `16px "DejaVu Sans Mono", "Menlo", "Consolas", ${CJK}, monospace`;
+const F_LARGE = `24px "DejaVu Sans Mono", "Menlo", "Consolas", ${CJK}, monospace`;
+const F_BAND = `24px "Helvetica Neue", Arial, ${CJK}, sans-serif`;
 
 function px(v) { return Math.round(v) + 0.5; }
 
@@ -300,21 +303,23 @@ function seg7char(ctx, x, y0, ch, w, h, color) {
 }
 
 // 右对齐、垂直居中的数字串（等同 MR_DATUM）
+// 比原厂 Font7 略小一号，并在字位之间留出 6px 间隙，读数更清楚。
 function drawDigits(ctx, str, xRight, midY, color) {
-  const h = 48;
+  const h = 40;
+  const DIGIT_W = 23;
+  const STEP = 29;      // 字位间距 = DIGIT_W + 6px 空隙
   const DOT_W = 12;
-  const DIGIT_W = 32;
   const y0 = midY - h / 2;
   let total = 0;
-  for (const c of str) total += c === '.' ? DOT_W : DIGIT_W;
+  for (const c of str) total += c === '.' ? DOT_W : STEP;
   let x = xRight - total;
   for (const c of str) {
     if (c === '.') {
-      rect(ctx, x + 2, y0 + h - 7, 6, 6, color);
+      rect(ctx, x + 3, y0 + h - 7, 6, 6, color);
       x += DOT_W;
     } else {
       seg7char(ctx, x, y0, c, DIGIT_W, h, color);
-      x += DIGIT_W;
+      x += STEP;
     }
   }
 }
@@ -350,6 +355,12 @@ function drawWiFiIndicator(ctx, th, x, y, connected) {
   }
 }
 
+// 与固件 Battery.cpp 的 BATT_SOC_LEVEL1/2/3 保持一致，改一边记得改另一边。
+const BATT_SOC_LEVEL1 = 3.68;
+const BATT_SOC_LEVEL2 = 3.78;
+const BATT_SOC_LEVEL3 = 3.88;
+const BATT_USB_THRESHOLD = 4.3;
+
 function drawBattery(ctx, th, x, y, volts) {
   roundRect(ctx, x, y + 1, 28, 14, 3, th.batt_border, null);
   line(ctx, x + 29, y + 5, x + 29, y + 10, th.batt_border);
@@ -357,8 +368,14 @@ function drawBattery(ctx, th, x, y, volts) {
 
   setFont(ctx, F_SMALL, th.batt_voltage, 'right', 'top');
 
+  // 还没收到有效电压（未连接 / 旧固件）时不要画 0.00V 和一格红电池
+  if (!volts || volts <= 0) {
+    ctx.fillText('--', x - 3, y);
+    return false;
+  }
+
   // 电压 > 4.3V（USB 供电）→ 画充电闪电
-  if (volts > 4.3) {
+  if (volts > BATT_USB_THRESHOLD) {
     roundRect(ctx, x + 2, y + 3, 24, 10, 2, null, th.batt_charge);
     ctx.fillStyle = th.batt_icon;
     ctx.fillRect(x + 19, y + 7, 10, 2);
@@ -369,10 +386,9 @@ function drawBattery(ctx, th, x, y, volts) {
 
   let level = 24;
   let color = th.batt_full;
-  const pct = volts;
-  if (pct < 3.68) { level = 6; color = th.batt_low; }
-  else if (pct < 3.78) { level = 12; color = th.batt_full; }
-  else if (pct < 3.88) { level = 18; color = th.batt_full; }
+  if (volts < BATT_SOC_LEVEL1) { level = 6; color = th.batt_low; }
+  else if (volts < BATT_SOC_LEVEL2) { level = 12; color = th.batt_full; }
+  else if (volts < BATT_SOC_LEVEL3) { level = 18; color = th.batt_full; }
 
   roundRect(ctx, x + 2, y + 3, level, 10, 2, null, color);
   ctx.fillText(volts.toFixed(2) + 'V', x - 3, y);
@@ -429,9 +445,19 @@ function drawFrequency(ctx, th, st) {
   }
 }
 
+// 与固件 drawStationName 一致：小字号（16px）+ 左对齐，超出面板宽度按字截断加省略号
 function drawStationName(ctx, th, name, x, y) {
-  setFont(ctx, F_LARGE, th.rds_text, 'center', 'top');
-  ctx.fillText(name, x, y);
+  const LEFT = x - 72 + 6;
+  const WIDTH = 152 - 12;
+
+  setFont(ctx, F_SMALL, th.rds_text, 'left', 'top');
+  if (ctx.measureText(name).width > WIDTH) {
+    const chars = Array.from(name);
+    while (chars.length && ctx.measureText(chars.join('') + '…').width > WIDTH) chars.pop();
+    name = chars.join('') + '…';
+  }
+
+  ctx.fillText(name, LEFT, y + 3);
 }
 
 // Menu.cpp drawInfo()：左侧信息框（菜单空闲时）

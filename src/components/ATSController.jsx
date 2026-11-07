@@ -46,6 +46,21 @@ export default function ATSController() {
   const lastResendTs = useRef(0);
   const resendCount = useRef(0);
 
+  // 顶部状态灯「● 同步 / ○ 无数据」：由 RemoteScreen 挂上来的面板复位函数
+  const panelResetRef = useRef(null);
+  const [dataFresh, setDataFresh] = useState(false);
+
+  // 状态流 1.2 秒没来新数据就判为「无数据」。只在真假翻转时才改状态，
+  // 避免每 400ms 触发一次整棵组件树重绘（手机上会掉帧）。
+  useEffect(() => {
+    if (!connected) { setDataFresh(false); return undefined; }
+    const id = setInterval(() => {
+      const fresh = Date.now() - lastMonitorTs.current < 1200;
+      setDataFresh((prev) => (prev === fresh ? prev : fresh));
+    }, 400);
+    return () => clearInterval(id);
+  }, [connected]);
+
   useEffect(() => {
     serialRef.current = new SerialConnection();
     bleRef.current = new BleConnection();
@@ -238,8 +253,8 @@ export default function ATSController() {
           <div
             className={`w-2 h-2 rounded-full shrink-0 ${connected ? 'bg-icom-green led-indicator' : 'bg-icom-red'}`}
           />
-          <div className="min-w-0 flex-1">
-            <div className="text-[11px] font-digital text-icom-text truncate leading-tight">
+          <div className="min-w-0 flex-1 flex items-center gap-1.5">
+            <span className="text-[11px] font-digital text-icom-text truncate leading-tight">
               {connected
                 ? `${connType === 'ble' ? '蓝牙' : 'USB'} · ${deviceName || 'ATS-Mini'}`
                 : autoConnecting
@@ -247,7 +262,23 @@ export default function ATSController() {
                   : savedDevice
                     ? `未连接 · 上次 ${savedDevice.name || 'ATS-Mini'}`
                     : 'ATS MINI 未连接'}
-            </div>
+            </span>
+            <button
+              onClick={() => panelResetRef.current?.()}
+              disabled={!connected}
+              className={`shrink-0 px-1.5 py-0.5 rounded text-[9px] font-digital transition-colors disabled:opacity-60 ${
+                dataFresh
+                  ? firmwareUi
+                    ? 'bg-icom-green/20 text-icom-green'
+                    : 'bg-icom-amber/20 text-icom-amber'
+                  : connected
+                    ? 'bg-icom-amber/20 text-icom-amber'
+                    : 'bg-white/10 text-white/40'
+              }`}
+              title="点一下把面板复位到信息框"
+            >
+              {dataFresh ? (firmwareUi ? '● 同步' : '● 实时') : connected ? '○ 无数据' : '未连接'}
+            </button>
           </div>
 
           {/* 连接方式：USB / 蓝牙 */}
@@ -299,6 +330,7 @@ export default function ATSController() {
             onReadStations={handleReadStations}
             onSaveStation={handleSaveStation}
             onDeleteStation={handleDeleteStation}
+            resetRef={panelResetRef}
           />
         </div>
       </div>

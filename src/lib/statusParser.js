@@ -32,6 +32,11 @@
  *   23 关机定时剩余分钟
  *   24 休眠定时设定值（秒）
  *   25 编码器档位（1 = 30定位/15脉冲）
+ *   26 FM 立体声导频
+ *   27 当前高亮选项
+ *   28 VFO A/B
+ *   29 电台名称（UTF-8，逗号已换成空格）
+ *   30 屏幕显示频率（Hz，含 BFO 微调；第 1 字段是接收机栅格频率，SSB 下两者差一格 BFO）
  *
  * 旧固件只推到第 14 字段，此时 hasUi 为 false，调用方退回本地状态机推断。
  */
@@ -104,10 +109,28 @@ export function parseStatusLine(line) {
 
   const isFM = v[5] === 'FM';
   const freqValue = parseFloat(v[1]);
-  const frequency = Number.isFinite(freqValue) ? freqValue * (isFM ? 10000 : 1000) : 0;
+  const bfoValue = parseInt(v[2], 10);
+  const bfo = Number.isFinite(bfoValue) ? bfoValue : 0;
 
-  const adcValue = parseFloat(v[13]);
-  const voltage = Number.isFinite(adcValue) ? (adcValue * 1.702) / 1000 : 0;
+  // 第 1 字段是「接收机栅格频率」，不是屏幕显示的频率：SSB 下 SI4735 只能落在
+  // 28kHz 网格上，屏幕上看到的 currentFrequency = 栅格频率 + BFO 微调（第 2 字段）。
+  // 直接拿第 1 字段当显示频率，SSB 下会整体偏掉一格 BFO（实测差 10kHz）。
+  //
+  // 汉化固件在第 31 字段追加了真实的显示频率（Hz），有它就优先用；旧固件没有，
+  // 就用「栅格 + BFO」还原，AM/FM 的 BFO 恒为 0，等同于原值。
+  const displayFreqField = parseInt(v[30], 10);
+  const gridHz = Number.isFinite(freqValue) ? Math.round(freqValue * (isFM ? 10000 : 1000)) : 0;
+  const frequency =
+    Number.isFinite(displayFreqField) && displayFreqField > 0
+      ? displayFreqField
+      : gridHz + (isFM ? 0 : bfo);
+
+  // 第 13 字段是固件里的 remoteVoltage，已经用 %.2f 格式化成了伏特字符串
+  // （见 Remote.cpp 的 remotePrintStatus）。这里直接取数值即可：再乘
+  // 1.702/1000 会把 4.05 算成 0.007，界面就永远显示 0.01V 加一格红电池。
+  const voltageRaw = parseFloat(v[13]);
+  const voltage =
+    Number.isFinite(voltageRaw) && voltageRaw > 1 && voltageRaw < 6 ? voltageRaw : 0;
 
   const hasUi = v.length >= EXT_FIELDS;
 
@@ -158,6 +181,9 @@ export function parseStatusLine(line) {
     stereo: v[26] === '1',
     option: parseInt(v[27], 10) || 0,
     vfo: parseInt(v[28], 10) || 0,
+    // 第 30 项（下标 29）是台名，可有可无：旧固件只推到 28。
+    // 固件已把逗号和换行替换成空格，可以直接用。
+    stationName: v[29] || '',
   };
 
   return {

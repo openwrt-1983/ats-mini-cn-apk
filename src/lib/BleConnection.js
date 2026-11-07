@@ -89,9 +89,13 @@ export class BleConnection {
     this.deviceName = '';
     this.connected = false;
     this.sleeping = false;
-    this.logOn = false;
     // 状态流里带界面字段 = 汉化固件新版，支持幂等 'g' 心跳命令
     this.hasExtendedStatus = false;
+    // 本次连接收到的状态行数。0 行 = 固件根本没在推流，可以放心补发；
+    // 有行 = 流已经开着，绝不能再发翻转语义的 't'，否则会把它关掉。
+    this.monitorRows = 0;
+    // 本次连接补发过几次开流命令，用来决定该用 'g' 还是退回 't'
+    this.monitorPokes = 0;
     this.buffer = '';
     // 跨通知保留半个 UTF-8 字符的状态，必须跟着连接走
     this.decoder = new TextDecoder('utf-8');
@@ -127,6 +131,15 @@ export class BleConnection {
   async _open(deviceId, name) {
     this.deviceId = deviceId;
     this.deviceName = name || 'ATS-Mini';
+
+    // 新会话：这些状态必须整体复位。留着上一轮的 hasExtendedStatus /
+    // monitorRows，会让 App 以为流已经开着，从而再也不补发命令。
+    this.hasExtendedStatus = false;
+    this.sleeping = false;
+    this.monitorRows = 0;
+    this.monitorPokes = 0;
+    this.buffer = '';
+    this.decoder = new TextDecoder('utf-8');
 
     // 连接（带断连回调）
     await BleClient.connect(this.deviceId, (id) => {
@@ -276,6 +289,9 @@ export class BleConnection {
     const parsed = parseStatusLine(data);
     if (!parsed) return;
 
+    // 只要收到一条合法状态行，就证明固件确实在推流
+    this.monitorRows += 1;
+
     // 固件回报的休眠状态是权威值，用来纠正本地猜测
     if (parsed.ui) {
       this.hasExtendedStatus = true;
@@ -346,19 +362,37 @@ export class BleConnection {
   toggleSleep() {
     return this.sleeping ? this.sleepOff() : this.sleepOn();
   }
-  // 监视器日志是『开关』语义：发一次 t 翻转一次，记下状态避免误关
   // 监视器日志：'t' 是翻转语义，'g' 是幂等开启。
-  // 新固件（状态流带界面字段）认 'g'，看门狗反复重发也不会把状态流关掉；
-  // 旧固件不认 'g'，只能继续用 't' 并靠本地 logOn 记账。
+  // 对外只保留 toggleMonitor 供界面上「手动开关」用，后台一律走 ensureMonitor。
   toggleMonitor() {
     if (this.hasExtendedStatus) return this.sendCommand('g');
-    this.logOn = !this.logOn;
     return this.sendCommand('t');
   }
 
-  ensureMonitor() {
+  /**
+   * 确保状态流是开着的。可以在看门狗里盲目重复调用。
+   *
+   * 三种情况，判断依据是「本次连接收到过几行状态」而不是本地记账：
+   *
+   * 1. 已经收到过带界面字段的行 → 新固件，发幂等的 'g'。发一百次也只会开，不会关。
+   * 2. 收到过状态行、但还没有界面字段 → 旧固件（≤ cn2），流是开着的，什么都不发。
+   * 3. 一行都没收到 → 流大概率是关的。**先发 'g'**：
+   *    新固件立刻开流且可重复；旧固件把 'g' 当未知命令静默丢弃（ParserAdhoc 的
+   *    UnknownCommand 分支不打印、不动作），没有任何副作用。
+   *    连续几次仍然是零行 → 说明确实是不认 'g' 的旧固件，这时才退回翻转语义的 't'。
+   *
+   * 老实现是 `logOn ? 直接返回 : 发 't' 并把 logOn 置真`。那条 't' 只要在链路
+   * 尚未就绪时被丢掉（自动重连最常见），logOn 就永远是 true，看门狗每次都空转，
+   * 状态流永久关闭 → 界面「收到 0 项状态」、频率 0.00、但读电台却是通的。
+   */
+  async ensureMonitor() {
+    if (!this.connected) return false;
     if (this.hasExtendedStatus) return this.sendCommand('g');
-    return this.logOn ? Promise.resolve() : this.toggleMonitor();
+    if (this.monitorRows > 0) return true;
+    this.monitorPokes += 1;
+    // 阈值给到 4 次（约 4 秒）：'g' 之后新固件 200ms 内就会推第一行，
+    // 拖到第四次还是零行，才敢断定是不认 'g' 的老固件，此时发 't' 才不会误关。
+    return this.sendCommand(this.monitorPokes >= 4 ? 't' : 'g');
   }
 
   // 删除存储槽：固件 remoteSetMemory() 以频率 0 表示清空

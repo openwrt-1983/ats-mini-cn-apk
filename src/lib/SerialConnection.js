@@ -51,9 +51,11 @@ export class SerialConnection {
     this.writer = null;
     this.connected = false;
     this.sleeping = false;
-    this.logOn = false;
     // 状态流里带界面字段 = 汉化固件新版，支持幂等 'g' 心跳命令
     this.hasExtendedStatus = false;
+    // 本次连接收到的状态行数：0 行才允许补发开流命令（见 ensureMonitor）
+    this.monitorRows = 0;
+    this.monitorPokes = 0;
     this.monitorCallback = null;
     this.uiCallback = null;
     this.errorCallback = null;
@@ -79,6 +81,13 @@ export class SerialConnection {
    * @param {number} baudRate - Baud rate (default: 115200)
    */
   async connect(baudRate = 115200) {
+    // 新会话：状态统计与「是否认识界面字段」都必须归零，否则重连后
+    // 会误以为状态流还开着，看门狗再也不补发命令
+    this.hasExtendedStatus = false;
+    this.sleeping = false;
+    this.monitorRows = 0;
+    this.monitorPokes = 0;
+    this.buffer = '';
     try {
       if (this.isAndroid) {
         return await this.connectAndroid(baudRate);
@@ -304,6 +313,9 @@ export class SerialConnection {
     const parsed = parseStatusLine(data);
     if (!parsed) return;
 
+    // 收到一条合法状态行 = 固件确实在推流
+    this.monitorRows += 1;
+
     if (parsed.ui) {
       this.hasExtendedStatus = true;
       this.sleeping = parsed.ui.sleep;
@@ -398,23 +410,31 @@ export class SerialConnection {
     else await this.sleepOn();
   }
 
-  // 监视器日志是『开关』语义：发一次 t 翻转一次，这里记下当前状态避免误关
   // 't' 翻转、'g' 幂等开启。新固件用 'g'，看门狗重发不会关掉状态流。
   async toggleMonitor() {
     if (this.hasExtendedStatus) {
       await this.sendCommand('g');
       return;
     }
-    this.logOn = !this.logOn;
     await this.sendCommand('t');
   }
 
+  /**
+   * 确保状态流开着，可被看门狗盲目重复调用（与 BleConnection 同一套逻辑）：
+   * 已学到界面字段 → 发幂等 'g'；本次连接收到过行 → 说明流开着，什么都不做；
+   * 一行都没有 → 先 'g'（旧固件静默忽略），连发 3 次仍零行才退回 't'。
+   * 串口不会丢包，这里主要是和 BLE 保持同一语义，避免两边行为不一致。
+   */
   async ensureMonitor() {
+    if (!this.connected) return false;
     if (this.hasExtendedStatus) {
       await this.sendCommand('g');
-      return;
+      return true;
     }
-    if (!this.logOn) await this.toggleMonitor();
+    if (this.monitorRows > 0) return true;
+    this.monitorPokes += 1;
+    await this.sendCommand(this.monitorPokes >= 4 ? 't' : 'g');
+    return true;
   }
 
   async takeScreenshot() { await this.sendCommand('C'); }

@@ -11,6 +11,9 @@ export default function ATSController() {
   const serialRef = useRef(null);
   const bleRef = useRef(null);
   const [connType, setConnType] = useState('ble'); // 'usb' | 'ble'
+  // 后台回调（visibilitychange）里要读到最新连接方式，用 ref 转一手
+  const connTypeRef = useRef('ble');
+  useEffect(() => { connTypeRef.current = connType; }, [connType]);
   const [connected, setConnected] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [autoConnecting, setAutoConnecting] = useState(false);
@@ -45,6 +48,13 @@ export default function ATSController() {
   const lastMonitorTs = useRef(0);
   const lastResendTs = useRef(0);
   const resendCount = useRef(0);
+  // 本次连接建立的时刻，以及是否已经尝试过「重建连接」这种重手段
+  const connectedAt = useRef(0);
+  const healTried = useRef(false);
+  // 自动重建连接的次数：一台上电周期内最多一次，避免「重连-零数据-再重连」死循环
+  const healCount = useRef(0);
+  // 用户主动点了「断开」——之后不要自动连回去
+  const userDisconnected = useRef(false);
 
   // 顶部状态灯「● 同步 / ○ 无数据」：由 RemoteScreen 挂上来的面板复位函数
   const panelResetRef = useRef(null);
@@ -121,37 +131,77 @@ export default function ATSController() {
           setDeviceName('');
           setStations([]);
           setFirmwareUi(null);
-        } else {
-          // 连接后先开监视器，再读一次存储电台（不依赖 connType，谁连上就开谁）
-          setTimeout(() => {
-            for (const c of [serialRef.current, bleRef.current]) {
-              if (c && c.connected) c.ensureMonitor();
-            }
-          }, 500);
-          setTimeout(() => {
-            if (serialRef.current && serialRef.current.connected) serialRef.current.showMemorySlots();
-            else if (bleRef.current && bleRef.current.connected) bleRef.current.showMemorySlots();
-          }, 1500);
+          return;
         }
+        // 本次连接起点：看门狗据此判断「连上多久还一条状态都没收到」
+        connectedAt.current = Date.now();
+        // 已经自动重建过一次就不再重来，否则会陷入 重连→零数据→重连 的循环
+        healTried.current = healCount.current >= 1;
+        lastMonitorTs.current = 0;
+        lastResendTs.current = 0;
+        resendCount.current = 0;
+
+        // 开状态流不能只赌一枪：链路刚就绪时写入偶尔会被丢，
+        // 连发三次（立即 / 0.7s / 2s），命令本身幂等，多发无害。
+        const arm = () => {
+          for (const c of [serialRef.current, bleRef.current]) {
+            if (c && c.connected) c.ensureMonitor();
+          }
+        };
+        arm();
+        setTimeout(arm, 700);
+        setTimeout(arm, 2000);
+
+        // 连接后读一次存储电台（不依赖 connType，谁连上就开谁）
+        setTimeout(() => {
+          const c = serialRef.current && serialRef.current.connected ? serialRef.current : bleRef.current;
+          if (c && c.connected) c.showMemorySlots();
+        }, 1600);
       });
     }
 
-    // 启动自动重连：只认上次连接过的设备，不弹系统选择器，失败静默（用户可手动点"连接"）
+    // 启动自动重连：只认上次连接过的设备（deviceId 存在本地），不弹系统选择器。
+    // 冷启动时蓝牙栈往往还没就绪，第一枪容易失败，所以退避重试 3 次。
     const saved = getSavedBleDevice();
     if (saved) {
       setSavedDevice(saved);
       (async () => {
         setAutoConnecting(true);
         try {
-          const ok = await bleRef.current.connect({ onlySaved: true, silent: true });
-          if (ok) setDeviceName(bleRef.current.deviceName || saved.name || 'ATS-Mini');
+          // 两轮足够：connect() 内部本身还会重试一次。再多会让「自动连接…」
+          // 在按钮上挂十几秒，用户会以为卡死了。
+          for (let attempt = 1; attempt <= 2; attempt += 1) {
+            const ok = await bleRef.current.connect({ onlySaved: true, silent: true });
+            if (ok) {
+              setDeviceName(bleRef.current.deviceName || saved.name || 'ATS-Mini');
+              setSavedDevice(getSavedBleDevice());
+              return;
+            }
+            if (attempt < 2) await new Promise((r) => setTimeout(r, 1000));
+          }
+          console.log('[ATS] 自动重连失败，等待用户手动连接');
         } catch { /* 静默 */ } finally {
           setAutoConnecting(false);
         }
       })();
     }
 
+    // 从后台切回前台时补一次静默重连：安卓常在后台回收 BLE 连接，
+    // 但用户主动点过「断开」的话就不打扰。
+    const onVisible = () => {
+      if (document.visibilityState !== 'visible') return;
+      if (userDisconnected.current || connTypeRef.current !== 'ble') return;
+      if (bleRef.current && bleRef.current.connected) return;
+      if (!getSavedBleDevice()) return;
+      console.log('[ATS] 回到前台，尝试静默重连');
+      bleRef.current.connect({ onlySaved: true, silent: true }).then((ok) => {
+        if (ok) setDeviceName(bleRef.current.deviceName || 'ATS-Mini');
+      }).catch(() => { /* 静默 */ });
+    };
+    document.addEventListener('visibilitychange', onVisible);
+
     return () => {
+      document.removeEventListener('visibilitychange', onVisible);
       if (serialRef.current && serialRef.current.connected) serialRef.current.disconnect();
       if (bleRef.current && bleRef.current.connected) bleRef.current.disconnect();
     };
@@ -165,16 +215,44 @@ export default function ATSController() {
       const conn = connType === 'ble' ? bleRef.current : serialRef.current;
       if (!conn || !conn.connected) return;
       // 息屏休眠中一律不补发：固件收到任何字节都会 sleepOn(false)，
-      // 保活用的 't' 会立刻把收音机唤醒，休眠就永远停不住。
+      // 保活命令会立刻把收音机唤醒，休眠就永远停不住。
       if (conn.sleeping) return;
       const now = Date.now();
+
+      // 连上了却一条状态都收不到：先靠 ensureMonitor 补发，6 秒还是零行
+      // 说明 GATT/CCCD 建得不干净（或写入通道坏），重建一次连接。
+      // 只对 BLE 做——USB 重建要用户重新授权，不能自作主张。
+      if (!lastMonitorTs.current && connectedAt.current && now - connectedAt.current > 6000) {
+        if (connType === 'ble' && bleRef.current && !healTried.current) {
+          healTried.current = true;
+          healCount.current += 1;
+          console.warn('[ATS] 已连接但 6 秒零状态，重建连接');
+          (async () => {
+            try {
+              await bleRef.current.disconnect();
+              await new Promise((r) => setTimeout(r, 800));
+              const ok = await bleRef.current.connect({ onlySaved: true, silent: true });
+              if (!ok) {
+                setError('连接已建立但收不到数据，自动重连也失败了，请点「连接」手动重连');
+                setTimeout(() => setError(null), 6000);
+              }
+            } catch { /* ignore */ }
+          })();
+        } else if (healTried.current) {
+          setError('连接已建立但收不到数据：请点「断开」，等两秒再点「连接」');
+          setTimeout(() => setError(null), 8000);
+        }
+        return;
+      }
+
       if (now - lastMonitorTs.current < 900) return;
-      // 连发重试要有间隔，避免把固件的『开关』式监视器来回翻
+      // 补发要有间隔，避免把固件的『开关』式监视器来回翻
       const gap = resendCount.current >= 3 ? 3000 : 1000;
       if (now - lastResendTs.current < gap) return;
       lastResendTs.current = now;
       resendCount.current += 1;
-      // ensureMonitor 对新固件发幂等的 'g'，不会像 't' 那样把状态流翻来翻去
+      // ensureMonitor：认识 'g' 就发幂等的 'g'；零行时也用 'g' 先探，
+      // 只有确认是老固件才退回 't'。不会像旧实现那样把状态流翻来翻去。
       conn.ensureMonitor();
     }, 250);
     return () => clearInterval(timer);
@@ -185,9 +263,13 @@ export default function ATSController() {
   const handleConnect = async () => {
     if (connecting) return;
     if (connected) {
+      // 用户明确要断开：之后从后台回来不要自作主张连回去
+      userDisconnected.current = true;
       await activeConn()?.disconnect();
       return;
     }
+    userDisconnected.current = false;
+    healCount.current = 0;   // 手动连接 = 重新开始计数
 
     if (connType === 'usb' && !SerialConnection.isSupported()) {
       setError('当前环境不支持 USB 串口，请改用蓝牙连接。');

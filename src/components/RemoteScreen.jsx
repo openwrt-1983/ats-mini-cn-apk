@@ -680,13 +680,21 @@ export default function RemoteScreen({
 
         {/* ===== 固件配套检查：不配套就把话说明白，别让用户以为屏幕不同步是 App 的问题 ===== */}
         {connected && !paired && (
-          <div className="rounded border border-red-500/40 bg-red-500/10 px-2 py-1.5 text-[10px] leading-relaxed text-red-300">
-            收音机固件未配套（收到 {fieldCount} 项状态，配套固件应 ≥ 26 项）。面板文字和光标只能由 App 推算，
-            所以菜单、设置、模式这些一定会和真机对不上；「BLE 待机」也只是熄屏，不会静音断电。
-            <div className="mt-0.5 text-red-200/80">
-              把 <span className="font-digital">ats-mini.ino.merged.bin</span> 刷到 0x0 地址，重连后这里会自动消失。
+          fieldCount > 0 ? (
+            <div className="rounded border border-red-500/40 bg-red-500/10 px-2 py-1.5 text-[10px] leading-relaxed text-red-300">
+              收音机固件未配套（收到 {fieldCount} 项状态，配套固件应 ≥ 26 项）。面板文字和光标只能由 App 推算，
+              所以菜单、设置、模式这些一定会和真机对不上；「BLE 待机」也只是熄屏，不会静音断电。
+              <div className="mt-0.5 text-red-200/80">
+                把 <span className="font-digital">ats-mini.ino.merged.bin</span> 刷到 0x0 地址，重连后这里会自动消失。
+              </div>
             </div>
-          </div>
+          ) : (
+            // 0 项 = 连接建立了但状态流没开，和「固件太旧」是两回事，不要误报成固件不配套
+            <div className="rounded border border-amber-500/40 bg-amber-500/10 px-2 py-1.5 text-[10px] leading-relaxed text-amber-300">
+              已连接，但还没收到状态流。App 正在自动补开并会重试；若几秒后仍停在这里，
+              点一下「断开」再点「连接」即可。
+            </div>
+          )
         )}
 
         {/* ===== 编码器：旋转左右两个 + 中间「点击」；下方「短按 / 长按」 ===== */}
